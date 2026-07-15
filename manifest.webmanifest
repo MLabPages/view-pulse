@@ -1,0 +1,9 @@
+{
+  "name": "ViewPulse",
+  "short_name": "ViewPulse",
+  "description": "見ていた場面と、その瞬間の反応を結び付ける端末内解析カメラ",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#090b10",
+  "theme_color": "#090b10"
+}
