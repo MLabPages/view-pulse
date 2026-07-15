@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090b10">
+  <title>ViewPulse — 見た瞬間と反応をつなぐ</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <section id="setupScreen" class="screen setup-screen">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div><strong>ViewPulse</strong><small>見た瞬間と反応をつなぐ</small></div>
+      </div>
+
+      <div class="hero-card">
+        <p class="eyebrow">FIELD EXPERIENCE CAPTURE</p>
+        <h1>撮るだけで、<br><span>心が動いた瞬間</span>が見える。</h1>
+        <p class="lead">外カメで見ていた風景を記録しながら、内カメで表情とおおまかな視線を端末内解析します。</p>
+
+        <div class="privacy-box">
+          <h2>撮影前の確認</h2>
+          <label class="check-row">
+            <input id="consentAnalysis" type="checkbox">
+            <span><strong>表情・視線の端末内解析に同意します</strong><small>解析値は外部へ送信されません。</small></span>
+          </label>
+          <label class="check-row optional">
+            <input id="saveReactionVideo" type="checkbox">
+            <span><strong>表情映像も端末内に保存する</strong><small>撮影後に「表情＋見ていた風景」のリアクション映像を楽しめます。任意です。</small></span>
+          </label>
+        </div>
+
+        <button id="prepareButton" class="primary-button" disabled>カメラを準備する</button>
+        <p id="setupStatus" class="status" role="status">同意項目を確認してください</p>
+      </div>
+
+      <div class="feature-row">
+        <div><span>01</span><strong>外カメ動画</strong><small>見ていた場面</small></div>
+        <div><span>02</span><strong>視線マップ</strong><small>注目した場所</small></div>
+        <div><span>03</span><strong>反応の波</strong><small>表情の変化</small></div>
+      </div>
+    </section>
+
+    <section id="cameraScreen" class="screen camera-screen hidden" aria-label="撮影画面">
+      <video id="rearPreview" autoplay muted playsinline></video>
+      <video id="frontPreview" autoplay muted playsinline class="analysis-source" aria-hidden="true"></video>
+      <div class="camera-shade"></div>
+      <header class="camera-header">
+        <button id="closeCameraButton" class="icon-button" aria-label="撮影を終了">×</button>
+        <div class="camera-brand">ViewPulse</div>
+        <div id="cameraModeBadge" class="mode-badge">DUAL</div>
+      </header>
+
+      <div id="calibrationLayer" class="calibration-layer hidden">
+        <div id="calibrationTarget" class="calibration-target"></div>
+        <div class="calibration-message"><strong>点を見てください</strong><span id="calibrationProgress">1 / 5</span></div>
+      </div>
+
+      <div class="camera-readout">
+        <div id="recordingBadge" class="recording-badge hidden"><i></i> REC <span id="recordingTime">00:00</span></div>
+        <div id="analysisBadge" class="analysis-badge"><i></i><span>表情解析を準備中</span></div>
+      </div>
+
+      <div class="camera-bottom">
+        <p id="cameraHint">まず視線位置を合わせると、ヒートマップが見やすくなります</p>
+        <div class="camera-actions">
+          <button id="calibrateButton" class="side-action"><span>◎</span>視線調整</button>
+          <button id="recordButton" class="record-button" disabled aria-label="録画開始"><span></span></button>
+          <button id="flipButton" class="side-action"><span>↻</span>表示反転</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="resultsScreen" class="screen results-screen hidden">
+      <header class="results-header">
+        <div class="brand compact"><span class="brand-mark"></span><strong>ViewPulse</strong></div>
+        <button id="newCaptureButton" class="text-button">新しく撮る</button>
+      </header>
+
+      <div class="result-intro">
+        <p class="eyebrow">YOUR VIEW PULSE</p>
+        <h1>心が動いた瞬間を、<br>映像で振り返る。</h1>
+        <p id="resultSummary">撮影した映像と反応を同期しています。</p>
+      </div>
+
+      <nav class="result-tabs" aria-label="結果表示">
+        <button class="tab active" data-tab="view">視線ヒートマップ</button>
+        <button id="reactionTab" class="tab" data-tab="reaction">リアクション映像</button>
+      </nav>
+
+      <section id="viewPanel" class="tab-panel">
+        <div class="viewer-card">
+          <div id="viewStage" class="video-stage">
+            <video id="resultRearVideo" controls playsinline></video>
+            <canvas id="heatmapCanvas"></canvas>
+          </div>
+          <div class="viewer-toolbar">
+            <label>表示
+              <select id="heatmapMode">
+                <option value="moment">その瞬間</option>
+                <option value="overall">全体</option>
+                <option value="off">なし</option>
+              </select>
+            </label>
+            <span><i class="heat-dot"></i>注目が集まった場所</span>
+          </div>
+        </div>
+
+        <div class="insight-grid">
+          <article><span class="metric-label">注視できた時間</span><strong id="metricTracked">—</strong><small>顔と目を検出できた割合</small></article>
+          <article><span class="metric-label">ポジティブ反応</span><strong id="metricPositive">—</strong><small>笑顔が見られた時間</small></article>
+          <article><span class="metric-label">最も見た領域</span><strong id="metricZone">—</strong><small>画面を9領域に分けた集計</small></article>
+        </div>
+
+        <div class="timeline-card">
+          <div class="section-title"><div><span>REACTION TIMELINE</span><h2>反応の波</h2></div><p>映像を再生すると現在位置が連動します</p></div>
+          <canvas id="timelineCanvas" height="220"></canvas>
+          <div class="legend"><span class="valence">感情価</span><span class="smile">笑顔</span><span class="cursor">再生位置</span></div>
+        </div>
+      </section>
+
+      <section id="reactionPanel" class="tab-panel hidden">
+        <div id="reactionUnavailable" class="empty-state hidden">
+          <div>◌</div><h2>表情映像は保存されていません</h2><p>撮影前に「表情映像も端末内に保存する」を選ぶと利用できます。</p>
+        </div>
+        <div id="reactionAvailable" class="reaction-layout hidden">
+          <canvas id="reactionCanvas" width="720" height="1280"></canvas>
+          <video id="resultFrontVideo" playsinline class="hidden-media"></video>
+          <div class="reaction-controls">
+            <button id="playReactionButton" class="primary-button">▶ リアクション映像を再生</button>
+            <button id="exportReactionButton" class="secondary-button">映像を書き出す</button>
+          </div>
+          <p id="exportStatus" class="status"></p>
+        </div>
+      </section>
+
+      <div class="download-row">
+        <button id="downloadVideoButton" class="secondary-button">外カメ動画を保存</button>
+        <button id="downloadDataButton" class="secondary-button">分析データを保存</button>
+      </div>
+      <p class="local-note">すべての映像と分析データは、この端末内だけで処理されています。</p>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
