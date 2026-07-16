@@ -17,11 +17,11 @@ if (missing.length) throw new Error(`HTMLに存在しないid参照: ${missing.j
 const requiredMarkers = [
   "getUserMedia", "MediaRecorder", "FaceLandmarker", "runCalibration",
   "drawHeatmap", "drawReactionComposite", "exportReaction", "indexedDB",
-  "renderLibrary", "navigator.share", "switchToSceneOnly",
+  "renderLibrary", "navigator.share", "stopUnsupportedCapture",
 ];
 const absentMarkers = requiredMarkers.filter((marker) => !app.includes(marker));
 if (absentMarkers.length) throw new Error(`主要機能が不足: ${absentMarkers.join(", ")}`);
 if (!css.includes("@media (max-width: 650px)")) throw new Error("スマホ向けレイアウトが不足");
 
 console.log(`OK: ${htmlIds.length}個のUI要素を検証`);
-console.log("OK: 前後カメラ・表情解析・視線調整・ヒートマップ・リアクション映像を確認");
+console.log("OK: 前後カメラ・表情解析・非対応時の撮影停止・視線調整・ヒートマップ・リアクション映像を確認");
