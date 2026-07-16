@@ -61,8 +61,12 @@ let rearUrl = "";
 let frontUrl = "";
 let currentCaptureId = "";
 let currentCaptureCreatedAt = "";
-let recoveringRear = false;
 let libraryObjectUrls = [];
+
+function isIOSBrowser() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
 
 function showScreen(name) {
   els.setupScreen.classList.toggle("hidden", name !== "setup");
@@ -123,47 +127,25 @@ async function streamIsHealthy(video, stream, settleMs = 650) {
   return !!track && track.readyState === "live" && !track.muted && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
 }
 
-function setSceneOnlyUi(message) {
-  els.cameraModeBadge.textContent = "SCENE ONLY";
-  els.analysisBadge.querySelector("span").textContent = "外カメ優先モード";
-  els.cameraHint.textContent = message;
+function stopUnsupportedCapture(message) {
+  stopAllStreams();
+  els.cameraModeBadge.textContent = "DUAL REQUIRED";
+  els.analysisBadge.querySelector("span").textContent = "分析を開始できません";
+  els.recordButton.disabled = true;
   els.calibrateButton.disabled = true;
-  els.recordButton.disabled = false;
-}
-
-async function switchToSceneOnly(message, forceRearRestart = false) {
-  if (recoveringRear) return;
-  recoveringRear = true;
-  analysisRunning = false;
-  cancelAnimationFrame(analysisRaf);
-  frontStream?.getTracks().forEach((track) => track.stop());
-  frontStream = null;
-  els.frontPreview.srcObject = null;
-  try {
-    const rearHealthy = !forceRearRestart && await streamIsHealthy(els.rearPreview, rearStream, 120);
-    if (!rearHealthy) {
-      rearStream?.getTracks().forEach((track) => track.stop());
-      rearStream = await requestCamera(
-        { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-        { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-      );
-      await attachCameraVideo(els.rearPreview, rearStream);
-    }
-    monitorRearTrack(rearStream);
-    setSceneOnlyUi(message);
-  } finally {
-    recoveringRear = false;
-  }
+  showScreen("setup");
+  setSetupStatus(message, true);
+  els.prepareButton.disabled = isIOSBrowser() || !els.consentAnalysis.checked;
 }
 
 function monitorRearTrack(stream) {
   const track = stream?.getVideoTracks?.()[0];
   if (!track) return;
   track.addEventListener("mute", () => {
-    if (rearStream !== stream || recording || recoveringRear) return;
+    if (rearStream !== stream || recording) return;
     setTimeout(() => {
       if (rearStream === stream && track.muted && !recording) {
-        switchToSceneOnly("iPhoneで外カメが停止したため、外カメ優先モードに切り替えました", true).catch(console.error);
+        stopUnsupportedCapture("前後カメラを同時に維持できないため、撮影を開始しませんでした。分析なしの動画は保存されません。");
       }
     }, 400);
   });
@@ -172,6 +154,12 @@ function monitorRearTrack(stream) {
 async function prepareCameras() {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     setSetupStatus("このブラウザはカメラ録画に対応していません。最新版のSafariまたはChromeをお試しください。", true);
+    return;
+  }
+
+  if (isIOSBrowser()) {
+    setSetupStatus("iPhone・iPadのブラウザは前後カメラの同時利用に未対応です。この分析にはiOSアプリ版が必要です。", true);
+    els.prepareButton.disabled = true;
     return;
   }
 
@@ -194,7 +182,7 @@ async function prepareCameras() {
       await attachCameraVideo(els.frontPreview, frontStream);
       const bothCamerasLive = await streamIsHealthy(els.rearPreview, rearStream);
       if (!bothCamerasLive) {
-        await switchToSceneOnly("このiPhoneでは前後カメラを同時に使えないため、外カメ優先モードに切り替えました", true);
+        stopUnsupportedCapture("前後カメラを同時に使えないため、撮影を開始しませんでした。分析なしの動画は保存されません。");
         return;
       }
       els.cameraModeBadge.textContent = "DUAL";
@@ -206,15 +194,13 @@ async function prepareCameras() {
         els.recordButton.disabled = false;
       } catch (modelError) {
         console.error(modelError);
-        els.analysisBadge.querySelector("span").textContent = "モデル読込失敗・外カメのみ";
-        els.cameraHint.textContent = "表情モデルを読み込めませんでした。外カメ動画だけ撮影できます";
-        els.recordButton.disabled = false;
+        stopUnsupportedCapture("表情モデルを読み込めなかったため、撮影を開始しませんでした。通信状態を確認してもう一度お試しください。");
       }
     } catch (frontError) {
       console.warn("Dual camera unavailable", frontError);
       frontStream?.getTracks().forEach((track) => track.stop());
       frontStream = null;
-      await switchToSceneOnly("この端末では前後カメラを同時に使えないため、外カメ動画のみ撮影します");
+      stopUnsupportedCapture("前後カメラを同時に使えないため、撮影を開始しませんでした。分析なしの動画は保存されません。");
     }
   } catch (error) {
     console.error(error);
