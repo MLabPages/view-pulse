@@ -17,33 +17,45 @@
       </div>
 
       <div class="hero-card">
-        <p class="eyebrow">FIELD EXPERIENCE CAPTURE</p>
-        <h1>撮るだけで、<br><span>心が動いた瞬間が</span><br>見える。</h1>
-        <p class="lead">対応端末では、外カメで見ていた風景を記録しながら、内カメで表情とおおまかな視線を端末内解析します。</p>
+        <p class="eyebrow">ON-SCREEN EXPERIENCE CAPTURE</p>
+        <h1>見たものと、<br><span>心が動いた瞬間を</span><br>ひとつに。</h1>
+        <p class="lead">端末内の画像・動画を画面いっぱいに表示しながら、内カメで表情とおおまかな視線を端末内解析します。</p>
 
-        <p class="compatibility-note"><strong>対応端末について</strong>iPhone・iPadのブラウザは前後カメラを同時に使えないため、現在のWeb版では撮影・分析できません。Android・PCの対応ブラウザでご利用ください。</p>
+        <div class="media-picker-card">
+          <div id="selectedMediaPreview" class="selected-media-preview">
+            <span>画像または動画を選んでください</span>
+          </div>
+          <div class="media-picker-copy">
+            <strong id="selectedMediaName">表示するコンテンツ</strong>
+            <small id="selectedMediaMeta">画像（JPEG / PNG / WebPなど）または動画を選択できます</small>
+          </div>
+          <label class="file-button" for="contentFileInput">画像・動画を選ぶ</label>
+          <input id="contentFileInput" type="file" accept="image/*,video/*" hidden>
+        </div>
+
+        <p class="compatibility-note"><strong>対応端末について</strong>使うカメラは内カメ1台だけです。iPhone・iPadを含む、カメラとMediaRecorderに対応した主要ブラウザで利用できます。カメラ利用にはHTTPSが必要です。</p>
 
         <div class="privacy-box">
-          <h2>撮影前の確認</h2>
+          <h2>開始前の確認</h2>
           <label class="check-row">
             <input id="consentAnalysis" type="checkbox">
-            <span><strong>表情・視線の端末内解析に同意します</strong><small>解析値は外部へ送信されません。</small></span>
+            <span><strong>表情・視線の端末内解析に同意します</strong><small>選んだコンテンツ、カメラ映像、解析値は外部へ送信されません。</small></span>
           </label>
           <label class="check-row optional">
             <input id="saveReactionVideo" type="checkbox">
-            <span><strong>表情映像も端末内に保存する</strong><small>撮影後に「表情＋見ていた風景」のリアクション映像を楽しめます。任意です。</small></span>
+            <span><strong>表情映像も端末内に保存する</strong><small>明示的に選んだ場合だけ保存します。未選択なら解析後に映像を破棄します。</small></span>
           </label>
         </div>
 
         <div class="setup-actions">
-          <button id="prepareButton" class="primary-button" disabled>カメラを準備する</button>
-          <button id="openLibraryButton" class="secondary-button">撮影ライブラリ <span id="libraryCountBadge" class="count-badge">0</span></button>
+          <button id="prepareButton" class="primary-button" disabled>内カメを準備する</button>
+          <button id="openLibraryButton" class="secondary-button">端末内ライブラリ <span id="libraryCountBadge" class="count-badge">0</span></button>
         </div>
-        <p id="setupStatus" class="status" role="status">同意項目を確認してください</p>
+        <p id="setupStatus" class="status" role="status">画像または動画を選び、同意項目を確認してください</p>
       </div>
 
       <div class="feature-row">
-        <div><span>01</span><strong>外カメ動画</strong><small>見ていた場面</small></div>
+        <div><span>01</span><strong>画像・動画</strong><small>画面いっぱいに表示</small></div>
         <div><span>02</span><strong>視線マップ</strong><small>注目した場所</small></div>
         <div><span>03</span><strong>反応の波</strong><small>表情の変化</small></div>
       </div>
@@ -52,28 +64,31 @@
     <section id="libraryScreen" class="screen library-screen hidden">
       <header class="results-header">
         <div class="brand compact"><span class="brand-mark"></span><strong>ViewPulse</strong></div>
-        <button id="closeLibraryButton" class="text-button">撮影画面へ戻る</button>
+        <button id="closeLibraryButton" class="text-button">開始画面へ戻る</button>
       </header>
       <div class="library-heading">
         <p class="eyebrow">ON-DEVICE LIBRARY</p>
         <h1>この端末に残した、<br>ViewPulse。</h1>
-        <p>動画と分析値はこのブラウザ内だけに保存されています。自動送信はされません。</p>
+        <p>コンテンツ、任意保存の表情映像、分析値はこのブラウザ内だけに保存されています。自動送信はされません。</p>
         <div id="storageStatus" class="storage-status">保存容量を確認中…</div>
       </div>
       <div id="libraryEmpty" class="empty-state">
-        <div>◌</div><h2>保存された撮影はまだありません</h2><p>撮影を終えると、この端末のライブラリへ自動保存されます。</p>
+        <div>◌</div><h2>保存された記録はまだありません</h2><p>記録を終えると、この端末のライブラリへ自動保存されます。</p>
       </div>
       <div id="libraryGrid" class="library-grid"></div>
     </section>
 
-    <section id="cameraScreen" class="screen camera-screen hidden" aria-label="撮影画面">
-      <video id="rearPreview" autoplay muted playsinline></video>
-      <video id="frontPreview" autoplay muted playsinline class="analysis-source" aria-hidden="true"></video>
-      <div class="camera-shade"></div>
+    <section id="captureScreen" class="screen capture-screen hidden" aria-label="記録画面">
+      <div id="contentStage" class="content-stage">
+        <img id="contentImage" alt="表示中のコンテンツ" class="hidden">
+        <video id="contentVideo" muted playsinline class="hidden"></video>
+      </div>
+      <video id="frontPreview" autoplay muted playsinline class="front-preview pip-mode" aria-label="解析中の内カメ映像"></video>
+      <div class="capture-shade"></div>
       <header class="camera-header">
-        <button id="closeCameraButton" class="icon-button" aria-label="撮影を終了">×</button>
+        <button id="closeCaptureButton" class="icon-button" aria-label="記録画面を閉じる">×</button>
         <div class="camera-brand">ViewPulse</div>
-        <div id="cameraModeBadge" class="mode-badge">DUAL</div>
+        <div id="contentTypeBadge" class="mode-badge">IMAGE</div>
       </header>
 
       <div id="calibrationLayer" class="calibration-layer hidden">
@@ -86,12 +101,17 @@
         <div id="analysisBadge" class="analysis-badge"><i></i><span>表情解析を準備中</span></div>
       </div>
 
+      <div class="preview-mode-switch" role="group" aria-label="内カメ表示モード">
+        <button id="pipModeButton" class="active" aria-pressed="true">小窓</button>
+        <button id="hiddenModeButton" aria-pressed="false">非表示</button>
+      </div>
+
       <div class="camera-bottom">
-        <p id="cameraHint">まず視線位置を合わせると、ヒートマップが見やすくなります</p>
+        <p id="captureHint">視線調整をすると、ヒートマップが見やすくなります</p>
         <div class="camera-actions">
           <button id="calibrateButton" class="side-action"><span>◎</span>視線調整</button>
-          <button id="recordButton" class="record-button" disabled aria-label="録画開始"><span></span></button>
-          <button id="flipButton" class="side-action"><span>↻</span>表示反転</button>
+          <button id="recordButton" class="record-button" disabled aria-label="記録開始"><span></span></button>
+          <button id="fullscreenButton" class="side-action"><span>⛶</span>全画面</button>
         </div>
       </div>
     </section>
@@ -99,13 +119,13 @@
     <section id="resultsScreen" class="screen results-screen hidden">
       <header class="results-header">
         <div class="brand compact"><span class="brand-mark"></span><strong>ViewPulse</strong></div>
-        <button id="newCaptureButton" class="text-button">新しく撮る</button>
+        <button id="newCaptureButton" class="text-button">新しく記録する</button>
       </header>
 
       <div class="result-intro">
         <p class="eyebrow">YOUR VIEW PULSE</p>
-        <h1>心が動いた瞬間を、<br>映像で振り返る。</h1>
-        <p id="resultSummary">撮影した映像と反応を同期しています。</p>
+        <h1>心が動いた瞬間を、<br>コンテンツと振り返る。</h1>
+        <p id="resultSummary">表示コンテンツと反応を同期しています。</p>
       </div>
 
       <nav class="result-tabs" aria-label="結果表示">
@@ -116,7 +136,8 @@
       <section id="viewPanel" class="tab-panel">
         <div class="viewer-card">
           <div id="viewStage" class="video-stage">
-            <video id="resultRearVideo" controls playsinline></video>
+            <img id="resultContentImage" alt="分析対象の画像" class="hidden">
+            <video id="resultContentVideo" controls playsinline class="hidden"></video>
             <canvas id="heatmapCanvas"></canvas>
           </div>
           <div class="viewer-toolbar">
@@ -138,15 +159,15 @@
         </div>
 
         <div class="timeline-card">
-          <div class="section-title"><div><span>REACTION TIMELINE</span><h2>反応の波</h2></div><p>映像を再生すると現在位置が連動します</p></div>
+          <div class="section-title"><div><span>REACTION TIMELINE</span><h2>反応の波</h2></div><p id="timelineHelp">再生位置と連動します</p></div>
           <canvas id="timelineCanvas" height="220"></canvas>
-          <div class="legend"><span class="valence">感情価</span><span class="smile">笑顔</span><span class="cursor">再生位置</span></div>
+          <div class="legend"><span class="valence">感情価</span><span class="smile">笑顔</span><span class="cursor">表示位置</span></div>
         </div>
       </section>
 
       <section id="reactionPanel" class="tab-panel hidden">
         <div id="reactionUnavailable" class="empty-state hidden">
-          <div>◌</div><h2>表情映像は保存されていません</h2><p>撮影前に「表情映像も端末内に保存する」を選ぶと利用できます。</p>
+          <div>◌</div><h2>表情映像は保存されていません</h2><p>開始前に「表情映像も端末内に保存する」を選んだ場合だけ利用できます。</p>
         </div>
         <div id="reactionAvailable" class="reaction-layout hidden">
           <canvas id="reactionCanvas" width="720" height="1280"></canvas>
@@ -161,10 +182,10 @@
 
       <div class="download-row">
         <button id="shareCaptureButton" class="primary-button">共有する</button>
-        <button id="downloadVideoButton" class="secondary-button">外カメ動画を保存</button>
+        <button id="downloadContentButton" class="secondary-button">表示コンテンツを保存</button>
         <button id="downloadDataButton" class="secondary-button">分析データを保存</button>
       </div>
-      <p id="saveStatus" class="local-note">すべての映像と分析データは、この端末内だけで処理されています。</p>
+      <p id="saveStatus" class="local-note">すべてのコンテンツ、映像、分析データは、この端末内だけで処理されています。</p>
     </section>
   </main>
   <script type="module" src="app.js"></script>
