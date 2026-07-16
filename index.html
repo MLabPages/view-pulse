@@ -33,7 +33,10 @@
           </label>
         </div>
 
-        <button id="prepareButton" class="primary-button" disabled>カメラを準備する</button>
+        <div class="setup-actions">
+          <button id="prepareButton" class="primary-button" disabled>カメラを準備する</button>
+          <button id="openLibraryButton" class="secondary-button">撮影ライブラリ <span id="libraryCountBadge" class="count-badge">0</span></button>
+        </div>
         <p id="setupStatus" class="status" role="status">同意項目を確認してください</p>
       </div>
 
@@ -42,6 +45,23 @@
         <div><span>02</span><strong>視線マップ</strong><small>注目した場所</small></div>
         <div><span>03</span><strong>反応の波</strong><small>表情の変化</small></div>
       </div>
+    </section>
+
+    <section id="libraryScreen" class="screen library-screen hidden">
+      <header class="results-header">
+        <div class="brand compact"><span class="brand-mark"></span><strong>ViewPulse</strong></div>
+        <button id="closeLibraryButton" class="text-button">撮影画面へ戻る</button>
+      </header>
+      <div class="library-heading">
+        <p class="eyebrow">ON-DEVICE LIBRARY</p>
+        <h1>この端末に残した、<br>ViewPulse。</h1>
+        <p>動画と分析値はこのブラウザ内だけに保存されています。自動送信はされません。</p>
+        <div id="storageStatus" class="storage-status">保存容量を確認中…</div>
+      </div>
+      <div id="libraryEmpty" class="empty-state">
+        <div>◌</div><h2>保存された撮影はまだありません</h2><p>撮影を終えると、この端末のライブラリへ自動保存されます。</p>
+      </div>
+      <div id="libraryGrid" class="library-grid"></div>
     </section>
 
     <section id="cameraScreen" class="screen camera-screen hidden" aria-label="撮影画面">
@@ -138,10 +158,11 @@
       </section>
 
       <div class="download-row">
+        <button id="shareCaptureButton" class="primary-button">共有する</button>
         <button id="downloadVideoButton" class="secondary-button">外カメ動画を保存</button>
         <button id="downloadDataButton" class="secondary-button">分析データを保存</button>
       </div>
-      <p class="local-note">すべての映像と分析データは、この端末内だけで処理されています。</p>
+      <p id="saveStatus" class="local-note">すべての映像と分析データは、この端末内だけで処理されています。</p>
     </section>
   </main>
   <script type="module" src="app.js"></script>
