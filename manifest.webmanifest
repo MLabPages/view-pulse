@@ -1,9 +1,28 @@
 {
   "name": "ViewPulse",
   "short_name": "ViewPulse",
-  "description": "見ていた場面と、その瞬間の反応を結び付ける端末内解析カメラ",
+  "id": "./",
+  "description": "画像・動画・YouTubeと、その瞬間の視線・表情を結び付ける端末内解析アプリ",
   "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#090b10",
-  "theme_color": "#090b10"
+  "theme_color": "#090b10",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "./?source=share",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
 }

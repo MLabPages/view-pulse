@@ -19,7 +19,7 @@
       <div class="hero-card">
         <p class="eyebrow">ON-SCREEN EXPERIENCE CAPTURE</p>
         <h1>見たものと、<br><span>心が動いた瞬間を</span><br>ひとつに。</h1>
-        <p class="lead">端末内の画像・動画を画面いっぱいに表示しながら、内カメで表情とおおまかな視線を端末内解析します。</p>
+        <p class="lead">端末内の画像・動画、またはYouTube動画を大きく表示しながら、内カメで表情とおおまかな視線を端末内解析します。</p>
 
         <div class="media-picker-card">
           <div id="selectedMediaPreview" class="selected-media-preview">
@@ -33,13 +33,24 @@
           <input id="contentFileInput" type="file" accept="image/*,video/*" hidden>
         </div>
 
+        <div class="source-divider"><span>または</span></div>
+        <div class="youtube-picker-card">
+          <div class="youtube-mark" aria-hidden="true">▶</div>
+          <div class="youtube-input-wrap">
+            <label for="youtubeUrlInput">YouTube URL</label>
+            <input id="youtubeUrlInput" type="url" inputmode="url" autocomplete="url" placeholder="https://www.youtube.com/watch?v=...">
+            <small id="youtubeStatus">YouTubeの共有URL、短縮URL、Shorts URLに対応します</small>
+          </div>
+          <button id="loadYoutubeButton" class="youtube-load-button">読み込む</button>
+        </div>
+
         <p class="compatibility-note"><strong>対応端末について</strong>使うカメラは内カメ1台だけです。iPhone・iPadを含む、カメラとMediaRecorderに対応した主要ブラウザで利用できます。カメラ利用にはHTTPSが必要です。</p>
 
         <div class="privacy-box">
           <h2>開始前の確認</h2>
           <label class="check-row">
             <input id="consentAnalysis" type="checkbox">
-            <span><strong>表情・視線の端末内解析に同意します</strong><small>選んだコンテンツ、カメラ映像、解析値は外部へ送信されません。</small></span>
+            <span><strong>表情・視線の端末内解析に同意します</strong><small>カメラ映像と解析値は外部へ送信されません。YouTube選択時は動画再生のためYouTubeへ接続します。</small></span>
           </label>
           <label class="check-row optional">
             <input id="saveReactionVideo" type="checkbox">
@@ -51,11 +62,11 @@
           <button id="prepareButton" class="primary-button" disabled>内カメを準備する</button>
           <button id="openLibraryButton" class="secondary-button">端末内ライブラリ <span id="libraryCountBadge" class="count-badge">0</span></button>
         </div>
-        <p id="setupStatus" class="status" role="status">画像または動画を選び、同意項目を確認してください</p>
+        <p id="setupStatus" class="status" role="status">画像・動画またはYouTube URLを選び、同意項目を確認してください</p>
       </div>
 
       <div class="feature-row">
-        <div><span>01</span><strong>画像・動画</strong><small>画面いっぱいに表示</small></div>
+        <div><span>01</span><strong>画像・動画・YouTube</strong><small>大きく表示して同期</small></div>
         <div><span>02</span><strong>視線マップ</strong><small>注目した場所</small></div>
         <div><span>03</span><strong>反応の波</strong><small>表情の変化</small></div>
       </div>
@@ -82,6 +93,7 @@
       <div id="contentStage" class="content-stage">
         <img id="contentImage" alt="表示中のコンテンツ" class="hidden">
         <video id="contentVideo" muted playsinline class="hidden"></video>
+        <div id="captureYoutubeWrap" class="youtube-player-wrap hidden"><div id="captureYoutubePlayer"></div></div>
       </div>
       <video id="frontPreview" autoplay muted playsinline class="front-preview pip-mode" aria-label="解析中の内カメ映像"></video>
       <div class="capture-shade"></div>
@@ -138,6 +150,7 @@
           <div id="viewStage" class="video-stage">
             <img id="resultContentImage" alt="分析対象の画像" class="hidden">
             <video id="resultContentVideo" controls playsinline class="hidden"></video>
+            <div id="resultYoutubeWrap" class="youtube-player-wrap hidden"><div id="resultYoutubePlayer"></div></div>
             <canvas id="heatmapCanvas"></canvas>
           </div>
           <div class="viewer-toolbar">
@@ -172,6 +185,7 @@
         <div id="reactionAvailable" class="reaction-layout hidden">
           <canvas id="reactionCanvas" width="720" height="1280"></canvas>
           <video id="resultFrontVideo" playsinline class="hidden-media"></video>
+          <p id="youtubeReactionNote" class="youtube-reaction-note hidden">YouTube映像は複製せず、動画名と同期時刻を小窓に表示します。</p>
           <div class="reaction-controls">
             <button id="playReactionButton" class="primary-button">▶ リアクション映像を再生</button>
             <button id="exportReactionButton" class="secondary-button">映像を書き出す</button>
