@@ -16,7 +16,8 @@ if (missing.length) throw new Error(`HTMLに存在しないid参照: ${missing.j
 
 const requiredMarkers = [
   "getUserMedia", "MediaRecorder", "FaceLandmarker", "runCalibration",
-  "drawHeatmap", "drawReactionComposite", "exportReaction",
+  "drawHeatmap", "drawReactionComposite", "exportReaction", "indexedDB",
+  "renderLibrary", "navigator.share", "switchToSceneOnly",
 ];
 const absentMarkers = requiredMarkers.filter((marker) => !app.includes(marker));
 if (absentMarkers.length) throw new Error(`主要機能が不足: ${absentMarkers.join(", ")}`);
