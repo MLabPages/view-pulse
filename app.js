@@ -17,7 +17,7 @@ const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
 ];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
-const GAZE_VERTICAL_GAIN = 2;
+const GAZE_VERTICAL_GAIN = 1.5;
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -536,32 +536,27 @@ async function collectCalibrationPoint(point, index, total, instruction) {
 }
 
 function fitCalibration(observations) {
-  const features = observations.map((o) => [o.rawX, o.rawY, 1]);
-  const xtx = Array.from({ length: 3 }, (_, r) => Array.from({ length: 3 }, (_, c) => features.reduce((sum, f) => sum + f[r] * f[c], 0)));
-  const solveFor = (key) => {
-    const xty = Array.from({ length: 3 }, (_, r) => features.reduce((sum, f, i) => sum + f[r] * observations[i][key], 0));
-    return solveLinearSystem(xtx.map((row) => [...row]), xty);
+  const horizontal = fitIndependentAxis(observations, "rawX", "targetX");
+  const vertical = fitIndependentAxis(observations, "rawY", "targetY");
+  return {
+    x: [horizontal.slope, 0, 0, 0, 0, horizontal.offset],
+    y: [0, vertical.slope, 0, 0, 0, vertical.offset],
+    axisRanges: { horizontal: horizontal.range, vertical: vertical.range },
   };
-  const affineToPolynomial = ([rawX, rawY, offset]) => [rawX, rawY, 0, 0, 0, offset];
-  return { x: affineToPolynomial(solveFor("targetX")), y: affineToPolynomial(solveFor("targetY")) };
 }
 
-function solveLinearSystem(matrix, vector) {
-  const a = matrix.map((row, i) => [...row, vector[i]]);
-  for (let col = 0; col < vector.length; col++) {
-    let pivot = col;
-    for (let row = col + 1; row < 3; row++) if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) pivot = row;
-    [a[col], a[pivot]] = [a[pivot], a[col]];
-    if (Math.abs(a[col][col]) < 1e-7) throw new Error("視線調整の差が不足しています");
-    const scale = a[col][col];
-    for (let c = col; c <= vector.length; c++) a[col][c] /= scale;
-    for (let row = 0; row < vector.length; row++) {
-      if (row === col) continue;
-      const factor = a[row][col];
-      for (let c = col; c <= vector.length; c++) a[row][c] -= factor * a[col][c];
-    }
-  }
-  return a.map((row) => row[vector.length]);
+function fitIndependentAxis(observations, rawKey, targetKey) {
+  const rawValues = observations.map((point) => point[rawKey]);
+  const targetValues = observations.map((point) => point[targetKey]);
+  const rawMean = rawValues.reduce((sum, value) => sum + value, 0) / rawValues.length;
+  const targetMean = targetValues.reduce((sum, value) => sum + value, 0) / targetValues.length;
+  const variance = rawValues.reduce((sum, value) => sum + (value - rawMean) ** 2, 0);
+  if (variance < 1e-5) throw new Error(`${rawKey === "rawY" ? "上下" : "左右"}の視線変化を十分に検出できませんでした`);
+  const covariance = rawValues.reduce((sum, value, index) => sum + (value - rawMean) * (targetValues[index] - targetMean), 0);
+  const slope = covariance / variance;
+  const range = Math.max(...rawValues) - Math.min(...rawValues);
+  if (!Number.isFinite(slope) || Math.abs(slope) < 0.05) throw new Error(`${rawKey === "rawY" ? "上下" : "左右"}の視線方向を識別できませんでした`);
+  return { slope, offset: targetMean - slope * rawMean, range };
 }
 
 function medianPose(observations) {
