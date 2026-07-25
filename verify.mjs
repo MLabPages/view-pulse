@@ -25,7 +25,7 @@ const requiredAppMarkers = [
   "sync_ms", "currentSyncMs", "runCalibration", "setPreviewMode", "preview-hidden",
   "drawHeatmap", "drawTimeline", "drawReactionComposite", "exportReaction",
   "content_blob", "rear_blob", "legacy_capture", "indexedDB", "renderLibrary",
-  "navigator.share", "libraryDelete", "schema_version: 3",
+  "navigator.share", "libraryDelete", "schema_version: 4", "currentCaptureGeometry", "recording_geometry",
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id",
 ];

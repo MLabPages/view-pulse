@@ -17,7 +17,7 @@ const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
 ];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
-const GAZE_VERTICAL_GAIN = 1.5;
+const VALIDATION_WARNING_DIAGONAL_RATIO = 0.18;
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -77,6 +77,7 @@ let recordTimer = 0;
 let samples = [];
 let calibrationModel = null;
 let calibrationCollect = null;
+let recordingGeometry = null;
 let reactionRaf = 0;
 let contentResultUrl = "";
 let frontResultUrl = "";
@@ -292,7 +293,10 @@ async function prepareCapture() {
     await loadFaceModel();
     startAnalysisLoop();
     els.analysisBadge.querySelector("span").textContent = "表情・視線を端末内解析";
-    els.recordButton.disabled = false;
+    calibrationModel = null;
+    recordingGeometry = null;
+    els.recordButton.disabled = true;
+    els.captureHint.textContent = "動画の表示領域に合わせて、視線調整を行ってから記録を開始してください";
   } catch (error) {
     console.error(error);
     stopAllStreams();
@@ -416,14 +420,13 @@ function updateAnalysisBadge(metrics) {
   else span.textContent = metrics.rawGazeX == null ? "目を確認中" : "表情・視線を端末内解析";
 }
 
-function mapGaze(rawX, rawY, metrics = null, ignoreMotion = false) {
+function mapGaze(rawX, rawY, metrics = null, { skipPoseCheck = false } = {}) {
   if (rawX == null || rawY == null) return null;
   if (calibrationModel) {
-    if (!ignoreMotion && metrics && !isCalibrationPoseStable(metrics)) return null;
-    const calibratedY = evaluateCalibration(calibrationModel.y, rawX, rawY);
+    if (!skipPoseCheck && metrics && !isCalibrationPoseStable(metrics)) return null;
     return {
       x: clamp(evaluateCalibration(calibrationModel.x, rawX, rawY), 0, 1),
-      y: clamp(ignoreMotion ? calibratedY : 0.5 + (calibratedY - 0.5) * GAZE_VERTICAL_GAIN, 0, 1),
+      y: clamp(evaluateCalibration(calibrationModel.y, rawX, rawY), 0, 1),
       calibrated: true,
     };
   }
@@ -471,52 +474,69 @@ function sampleMetrics(now, metrics) {
 
 async function runCalibration() {
   if (!frontStream || !faceLandmarker || recording) return;
+  const geometry = currentCaptureGeometry();
+  if (!geometry) {
+    els.captureHint.textContent = "動画の表示サイズを確認中です。数秒待ってから視線調整を開始してください";
+    return;
+  }
   els.calibrateButton.disabled = true;
   els.recordButton.disabled = true;
   els.calibrationLayer.classList.remove("hidden");
   const observations = [];
   try {
     for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
-      observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "視線を合わせています"));
+      observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "動画内の点を見てください", geometry));
     }
     calibrationModel = fitCalibration(observations);
     calibrationModel.pose = medianPose(observations);
     calibrationModel.viewport = currentViewport();
+    calibrationModel.geometry = geometry;
+    calibrationModel.observations = observations;
     let qualityMessage = "視線調整が完了しました";
     try {
       const validations = [];
       for (let i = 0; i < CALIBRATION_VALIDATION_POINTS.length; i++) {
-        validations.push(await collectCalibrationPoint(CALIBRATION_VALIDATION_POINTS[i], i, CALIBRATION_VALIDATION_POINTS.length, "精度を確認しています"));
+        validations.push(await collectCalibrationPoint(CALIBRATION_VALIDATION_POINTS[i], i, CALIBRATION_VALIDATION_POINTS.length, "精度を確認しています", geometry));
       }
-      const errors = validations.map((point) => {
-        const mapped = mapGaze(point.rawX, point.rawY, point, true);
-        return Math.hypot(mapped.x - point.targetX, mapped.y - point.targetY);
+      const checks = validations.map((point) => {
+        const mapped = mapGaze(point.rawX, point.rawY, point, { skipPoseCheck: true });
+        const errorX = mapped.x - point.targetX;
+        const errorY = mapped.y - point.targetY;
+        const errorPx = Math.hypot(errorX * geometry.media.width, errorY * geometry.media.height);
+        return { ...point, predictedX: round(mapped.x), predictedY: round(mapped.y), error_x: round(errorX), error_y: round(errorY), error_px: round(errorPx) };
       });
-      const meanError = errors.reduce((sum, value) => sum + value, 0) / errors.length;
-      qualityMessage += `（確認時の平均ずれ ${(meanError * 100).toFixed(0)}%）`;
-      if (meanError > 0.18) qualityMessage += "。位置は大まかな目安としてご利用ください";
+      const diagonalPx = Math.hypot(geometry.media.width, geometry.media.height);
+      const meanErrorPx = checks.reduce((sum, point) => sum + point.error_px, 0) / checks.length;
+      const maxErrorPx = Math.max(...checks.map((point) => point.error_px));
+      const meanDiagonalRatio = meanErrorPx / diagonalPx;
+      calibrationModel.validation = { status: "measured", points: checks, mean_error_px: round(meanErrorPx), max_error_px: round(maxErrorPx), mean_diagonal_ratio: round(meanDiagonalRatio) };
+      qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
+      if (meanDiagonalRatio > VALIDATION_WARNING_DIAGONAL_RATIO) qualityMessage += "。ずれが大きいため、再調整をおすすめします";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
+      calibrationModel.validation = { status: "skipped", reason: validationError.message || "unknown" };
       qualityMessage += "（精度確認は省略されました）";
     }
     els.captureHint.textContent = qualityMessage;
     els.calibrateButton.innerHTML = "<span>✓</span>調整済み";
+    els.recordButton.disabled = false;
   } catch (error) {
     console.warn(error);
     calibrationModel = null;
+    els.recordButton.disabled = true;
     els.captureHint.textContent = `視線調整を完了できませんでした（${error.message || "視線を検出できませんでした"}）。端末を固定して再度お試しください`;
   } finally {
     calibrationCollect = null;
     els.calibrationLayer.classList.add("hidden");
     els.calibrateButton.disabled = false;
-    els.recordButton.disabled = false;
+    if (!recording) els.recordButton.disabled = !calibrationModel;
   }
 }
 
-async function collectCalibrationPoint(point, index, total, instruction) {
+async function collectCalibrationPoint(point, index, total, instruction, geometry) {
   els.calibrationInstruction.textContent = instruction;
-  els.calibrationTarget.style.left = `${point.x * 100}%`;
-  els.calibrationTarget.style.top = `${point.y * 100}%`;
+  els.calibrationTarget.style.left = `${geometry.media.x + point.x * geometry.media.width}px`;
+  els.calibrationTarget.style.top = `${geometry.media.y + point.y * geometry.media.height}px`;
   els.calibrationProgress.textContent = `${index + 1} / ${total}`;
   calibrationCollect = [];
   await delay(500);
@@ -569,6 +589,34 @@ function medianPose(observations) {
 
 function currentViewport() { return { width: window.innerWidth, height: window.innerHeight }; }
 
+function currentCaptureGeometry() {
+  const screen = els.captureScreen.getBoundingClientRect();
+  const stage = els.contentStage.getBoundingClientRect();
+  let mediaWidth = 16;
+  let mediaHeight = 9;
+  if (contentKind === "image") {
+    mediaWidth = els.contentImage.naturalWidth;
+    mediaHeight = els.contentImage.naturalHeight;
+  } else if (contentKind === "video") {
+    mediaWidth = els.contentVideo.videoWidth;
+    mediaHeight = els.contentVideo.videoHeight;
+  }
+  if (!stage.width || !stage.height || !mediaWidth || !mediaHeight) return null;
+  const scale = Math.min(stage.width / mediaWidth, stage.height / mediaHeight);
+  const width = mediaWidth * scale;
+  const height = mediaHeight * scale;
+  return {
+    coordinate_space: "capture-media-normalized",
+    viewport: { width: round(screen.width), height: round(screen.height), dpr: round(window.devicePixelRatio || 1) },
+    media: {
+      x: round(stage.left - screen.left + (stage.width - width) / 2),
+      y: round(stage.top - screen.top + (stage.height - height) / 2),
+      width: round(width), height: round(height),
+      aspect_ratio: round(mediaWidth / mediaHeight),
+    },
+  };
+}
+
 function invalidateCalibrationForViewport() {
   if (!calibrationModel?.viewport || els.captureScreen.classList.contains("hidden")) return;
   const viewport = currentViewport();
@@ -576,6 +624,8 @@ function invalidateCalibrationForViewport() {
     || Math.abs(viewport.height - calibrationModel.viewport.height) > 16;
   if (!changed) return;
   calibrationModel = null;
+  recordingGeometry = null;
+  els.recordButton.disabled = true;
   els.calibrateButton.innerHTML = "<span>◎</span>視線調整";
   els.captureHint.textContent = "表示領域が変わりました。記録前に視線調整をやり直してください";
 }
@@ -594,10 +644,16 @@ function makeRecorder(stream, chunks) {
 
 async function startRecording() {
   if (!frontStream || recording || stopping) return;
+  if (!calibrationModel?.geometry) {
+    els.recordButton.disabled = true;
+    els.captureHint.textContent = "視線調整が必要です。動画内の点を見ながら「視線調整」を完了してください";
+    return;
+  }
   currentCaptureId = "";
   currentCaptureCreatedAt = "";
   frontChunks = [];
   samples = [];
+  recordingGeometry = calibrationModel.geometry;
   imageTimelineMs = 0;
   frontRecorder = null;
   if (els.saveReactionVideo.checked) {
@@ -777,7 +833,8 @@ async function saveCurrentCapture(thumbnail) {
     thumbnail_blob: thumbnail,
     samples,
     calibration_model: calibrationModel,
-    version: 3,
+    recording_geometry: recordingGeometry,
+    version: 4,
   });
   await refreshLibraryBadge();
 }
@@ -1279,7 +1336,7 @@ function downloadBlob(blob, name) {
 function captureDataBlob(capture) {
   return new Blob([JSON.stringify({
     app: "ViewPulse",
-    schema_version: 3,
+    schema_version: 4,
     capture_id: capture.id || "",
     created_at: capture.created_at || new Date().toISOString(),
     content: {
@@ -1292,6 +1349,8 @@ function captureDataBlob(capture) {
     },
     synchronization: capture.content_kind === "image" ? "elapsed_ms" : capture.content_kind === "youtube" ? "youtube_playback_ms" : "content_playback_ms",
     calibration: capture.calibration_model ? "nine-point" : "uncalibrated",
+    calibration_model: capture.calibration_model || null,
+    recording_geometry: capture.recording_geometry || null,
     samples: capture.samples || [],
   }, null, 2)], { type: "application/json" });
 }
@@ -1369,7 +1428,8 @@ function currentCapture() {
     front_blob: frontBlob,
     samples,
     calibration_model: calibrationModel,
-    version: 3,
+    recording_geometry: recordingGeometry,
+    version: 4,
   };
 }
 
