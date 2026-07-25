@@ -12,6 +12,11 @@ const CALIBRATION_POINTS = [
   { x: 0.15, y: 0.5 }, { x: 0.5, y: 0.5 }, { x: 0.85, y: 0.5 },
   { x: 0.15, y: 0.85 }, { x: 0.5, y: 0.85 }, { x: 0.85, y: 0.85 },
 ];
+const CALIBRATION_VALIDATION_POINTS = [
+  { x: 0.32, y: 0.32 }, { x: 0.68, y: 0.32 },
+  { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
+];
+const HEATMAP_MOMENT_WINDOW_MS = 500;
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -26,7 +31,7 @@ const els = {
   contentStage: $("contentStage"), contentImage: $("contentImage"), contentVideo: $("contentVideo"),
   captureYoutubeWrap: $("captureYoutubeWrap"),
   frontPreview: $("frontPreview"), contentTypeBadge: $("contentTypeBadge"), closeCaptureButton: $("closeCaptureButton"),
-  captureHint: $("captureHint"), calibrationLayer: $("calibrationLayer"), calibrationTarget: $("calibrationTarget"),
+  captureHint: $("captureHint"), calibrationLayer: $("calibrationLayer"), calibrationTarget: $("calibrationTarget"), calibrationInstruction: $("calibrationInstruction"),
   calibrationProgress: $("calibrationProgress"), calibrateButton: $("calibrateButton"),
   recordingBadge: $("recordingBadge"), recordingTime: $("recordingTime"), analysisBadge: $("analysisBadge"),
   recordButton: $("recordButton"), fullscreenButton: $("fullscreenButton"),
@@ -355,7 +360,10 @@ function startAnalysisLoop() {
       latestMetrics = computeFaceMetrics(result);
       updateAnalysisBadge(latestMetrics);
       if (calibrationCollect && latestMetrics?.rawGazeX != null) {
-        calibrationCollect.push({ x: latestMetrics.rawGazeX, y: latestMetrics.rawGazeY });
+        calibrationCollect.push({
+          x: latestMetrics.rawGazeX, y: latestMetrics.rawGazeY,
+          yaw: latestMetrics.yaw, pitch: latestMetrics.pitch, eyeDistance: latestMetrics.eyeDistance,
+        });
       }
       if (recording) sampleMetrics(now, latestMetrics);
     } catch (error) {
@@ -395,7 +403,7 @@ function computeFaceMetrics(result) {
   }
   return {
     faceDetected: true, smile, furrow, browRaise, eyeOpen,
-    valence: smile - furrow, yaw, pitch, rawGazeX, rawGazeY,
+    valence: smile - furrow, yaw, pitch, eyeDistance: io, rawGazeX, rawGazeY,
     attention: Math.abs(yaw) < 0.35 && eyeOpen > 0.3 ? 1 : 0,
   };
 }
@@ -406,16 +414,31 @@ function updateAnalysisBadge(metrics) {
   else span.textContent = metrics.rawGazeX == null ? "目を確認中" : "表情・視線を端末内解析";
 }
 
-function mapGaze(rawX, rawY) {
+function mapGaze(rawX, rawY, metrics = null, ignoreMotion = false) {
   if (rawX == null || rawY == null) return null;
   if (calibrationModel) {
+    if (!ignoreMotion && metrics && !isCalibrationPoseStable(metrics)) return null;
     return {
-      x: clamp(calibrationModel.x[0] * rawX + calibrationModel.x[1] * rawY + calibrationModel.x[2], 0, 1),
-      y: clamp(calibrationModel.y[0] * rawX + calibrationModel.y[1] * rawY + calibrationModel.y[2], 0, 1),
+      x: clamp(evaluateCalibration(calibrationModel.x, rawX, rawY), 0, 1),
+      y: clamp(evaluateCalibration(calibrationModel.y, rawX, rawY), 0, 1),
       calibrated: true,
     };
   }
   return { x: clamp((rawX + 1) / 2, 0, 1), y: clamp((rawY + 1) / 2, 0, 1), calibrated: false };
+}
+
+function evaluateCalibration(coefficients, rawX, rawY) {
+  const features = [rawX, rawY, rawX * rawX, rawX * rawY, rawY * rawY, 1];
+  return coefficients.reduce((sum, coefficient, index) => sum + coefficient * features[index], 0);
+}
+
+function isCalibrationPoseStable(metrics) {
+  const pose = calibrationModel?.pose;
+  if (!pose) return true;
+  const distanceRatio = Math.abs(metrics.eyeDistance - pose.eyeDistance) / Math.max(pose.eyeDistance, 1e-6);
+  return Math.abs(metrics.yaw - pose.yaw) <= 0.16
+    && Math.abs(metrics.pitch - pose.pitch) <= 0.12
+    && distanceRatio <= 0.2;
 }
 
 function currentSyncMs(now = performance.now()) {
@@ -425,13 +448,14 @@ function currentSyncMs(now = performance.now()) {
 }
 
 function sampleMetrics(now, metrics) {
-  const gaze = metrics?.faceDetected ? mapGaze(metrics.rawGazeX, metrics.rawGazeY) : null;
+  const gaze = metrics?.faceDetected ? mapGaze(metrics.rawGazeX, metrics.rawGazeY, metrics) : null;
   samples.push({
     elapsed_ms: Math.max(0, Math.round(now - recordStart)),
     sync_ms: currentSyncMs(now),
     content_kind: contentKind,
     face_detected: metrics?.faceDetected ? 1 : 0,
     gaze_x: round(gaze?.x), gaze_y: round(gaze?.y), gaze_calibrated: gaze?.calibrated ? 1 : 0,
+    gaze_excluded_motion: metrics?.faceDetected && metrics?.rawGazeX != null && !gaze ? 1 : 0,
     gaze_zone: gaze ? gazeZone(gaze.x, gaze.y) : "",
     attention: metrics?.attention ?? 0,
     smile: round(metrics?.smile), brow_furrow: round(metrics?.furrow),
@@ -448,28 +472,28 @@ async function runCalibration() {
   const observations = [];
   try {
     for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
-      const point = CALIBRATION_POINTS[i];
-      els.calibrationTarget.style.left = `${point.x * 100}%`;
-      els.calibrationTarget.style.top = `${point.y * 100}%`;
-      els.calibrationProgress.textContent = `${i + 1} / ${CALIBRATION_POINTS.length}`;
-      calibrationCollect = [];
-      await delay(500);
-      calibrationCollect = [];
-      await delay(1200);
-      if (calibrationCollect.length < 4) throw new Error("視線を十分に検出できませんでした");
-      const rawX = median(calibrationCollect.map((p) => p.x));
-      const rawY = median(calibrationCollect.map((p) => p.y));
-      const spread = median(calibrationCollect.map((p) => Math.hypot(p.x - rawX, p.y - rawY)));
-      if (spread > 0.12) throw new Error("視線が安定していませんでした");
-      observations.push({ rawX, rawY, targetX: point.x, targetY: point.y });
+      observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "視線を合わせています"));
     }
     calibrationModel = fitCalibration(observations);
-    els.captureHint.textContent = "視線調整が完了しました。記録を開始できます";
+    const validations = [];
+    for (let i = 0; i < CALIBRATION_VALIDATION_POINTS.length; i++) {
+      validations.push(await collectCalibrationPoint(CALIBRATION_VALIDATION_POINTS[i], i, CALIBRATION_VALIDATION_POINTS.length, "精度を確認しています"));
+    }
+    const errors = validations.map((point) => {
+      const mapped = mapGaze(point.rawX, point.rawY, point, true);
+      return Math.hypot(mapped.x - point.targetX, mapped.y - point.targetY);
+    });
+    const meanError = errors.reduce((sum, value) => sum + value, 0) / errors.length;
+    const maxError = Math.max(...errors);
+    if (meanError > 0.13 || maxError > 0.24) throw new Error(`精度確認で平均ずれ ${(meanError * 100).toFixed(0)}%`);
+    calibrationModel.pose = medianPose(observations);
+    calibrationModel.viewport = currentViewport();
+    els.captureHint.textContent = `視線調整が完了しました（確認時の平均ずれ ${(meanError * 100).toFixed(0)}%）`;
     els.calibrateButton.innerHTML = "<span>✓</span>調整済み";
   } catch (error) {
     console.warn(error);
     calibrationModel = null;
-    els.captureHint.textContent = "視線調整を完了できませんでした。顔を画面側に向けて再度お試しください";
+    els.captureHint.textContent = "視線調整を完了できませんでした。端末を固定し、顔を画面側に向けて再度お試しください";
   } finally {
     calibrationCollect = null;
     els.calibrationLayer.classList.add("hidden");
@@ -478,32 +502,75 @@ async function runCalibration() {
   }
 }
 
+async function collectCalibrationPoint(point, index, total, instruction) {
+  els.calibrationInstruction.textContent = instruction;
+  els.calibrationTarget.style.left = `${point.x * 100}%`;
+  els.calibrationTarget.style.top = `${point.y * 100}%`;
+  els.calibrationProgress.textContent = `${index + 1} / ${total}`;
+  calibrationCollect = [];
+  await delay(500);
+  calibrationCollect = [];
+  await delay(1200);
+  if (calibrationCollect.length < 4) throw new Error("視線を十分に検出できませんでした");
+  const rawX = median(calibrationCollect.map((p) => p.x));
+  const rawY = median(calibrationCollect.map((p) => p.y));
+  const spread = median(calibrationCollect.map((p) => Math.hypot(p.x - rawX, p.y - rawY)));
+  if (spread > 0.12) throw new Error("視線が安定していませんでした");
+  return {
+    rawX, rawY, targetX: point.x, targetY: point.y,
+    yaw: median(calibrationCollect.map((p) => p.yaw)),
+    pitch: median(calibrationCollect.map((p) => p.pitch)),
+    eyeDistance: median(calibrationCollect.map((p) => p.eyeDistance)),
+  };
+}
+
 function fitCalibration(observations) {
-  const features = observations.map((o) => [o.rawX, o.rawY, 1]);
-  const xtx = Array.from({ length: 3 }, (_, r) => Array.from({ length: 3 }, (_, c) => features.reduce((sum, f) => sum + f[r] * f[c], 0)));
+  const features = observations.map((o) => [o.rawX, o.rawY, o.rawX * o.rawX, o.rawX * o.rawY, o.rawY * o.rawY, 1]);
+  const xtx = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, c) => features.reduce((sum, f) => sum + f[r] * f[c], 0)));
   const solveFor = (key) => {
-    const xty = Array.from({ length: 3 }, (_, r) => features.reduce((sum, f, i) => sum + f[r] * observations[i][key], 0));
-    return solve3(xtx.map((row) => [...row]), xty);
+    const xty = Array.from({ length: 6 }, (_, r) => features.reduce((sum, f, i) => sum + f[r] * observations[i][key], 0));
+    return solveLinearSystem(xtx.map((row) => [...row]), xty);
   };
   return { x: solveFor("targetX"), y: solveFor("targetY") };
 }
 
-function solve3(matrix, vector) {
+function solveLinearSystem(matrix, vector) {
   const a = matrix.map((row, i) => [...row, vector[i]]);
-  for (let col = 0; col < 3; col++) {
+  for (let col = 0; col < vector.length; col++) {
     let pivot = col;
     for (let row = col + 1; row < 3; row++) if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) pivot = row;
     [a[col], a[pivot]] = [a[pivot], a[col]];
     if (Math.abs(a[col][col]) < 1e-7) throw new Error("視線調整の差が不足しています");
     const scale = a[col][col];
-    for (let c = col; c < 4; c++) a[col][c] /= scale;
-    for (let row = 0; row < 3; row++) {
+    for (let c = col; c <= vector.length; c++) a[col][c] /= scale;
+    for (let row = 0; row < vector.length; row++) {
       if (row === col) continue;
       const factor = a[row][col];
-      for (let c = col; c < 4; c++) a[row][c] -= factor * a[col][c];
+      for (let c = col; c <= vector.length; c++) a[row][c] -= factor * a[col][c];
     }
   }
-  return a.map((row) => row[3]);
+  return a.map((row) => row[vector.length]);
+}
+
+function medianPose(observations) {
+  return {
+    yaw: median(observations.map((point) => point.yaw)),
+    pitch: median(observations.map((point) => point.pitch)),
+    eyeDistance: median(observations.map((point) => point.eyeDistance)),
+  };
+}
+
+function currentViewport() { return { width: window.innerWidth, height: window.innerHeight }; }
+
+function invalidateCalibrationForViewport() {
+  if (!calibrationModel?.viewport || els.captureScreen.classList.contains("hidden")) return;
+  const viewport = currentViewport();
+  const changed = Math.abs(viewport.width - calibrationModel.viewport.width) > 16
+    || Math.abs(viewport.height - calibrationModel.viewport.height) > 16;
+  if (!changed) return;
+  calibrationModel = null;
+  els.calibrateButton.innerHTML = "<span>◎</span>視線調整";
+  els.captureHint.textContent = "表示領域が変わりました。記録前に視線調整をやり直してください";
 }
 
 function supportedMime() {
@@ -936,7 +1003,7 @@ function drawHeatmap() {
   const mode = els.heatmapMode.value;
   if (mode === "off" || !samples.length) return;
   const t = resultSyncMs();
-  const visible = samples.filter((sample) => sample.gaze_x !== "" && (mode === "overall" || Math.abs(sampleTime(sample) - t) <= 1200));
+  const visible = samples.filter((sample) => sample.gaze_x !== "" && (mode === "overall" || Math.abs(sampleTime(sample) - t) <= HEATMAP_MOMENT_WINDOW_MS));
   const media = contentKind === "image" ? els.resultContentImage : els.resultContentVideo;
   const rect = contentKind === "youtube"
     ? { x: 0, y: 0, width: canvas.width, height: canvas.height }
@@ -945,7 +1012,7 @@ function drawHeatmap() {
   for (const sample of visible) {
     const x = rect.x + number(sample.gaze_x) * rect.width;
     const y = rect.y + number(sample.gaze_y) * rect.height;
-    const radius = Math.max(28, rect.width * (mode === "overall" ? 0.065 : 0.09));
+    const radius = Math.max(24, rect.width * (mode === "overall" ? 0.055 : 0.045));
     const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
     gradient.addColorStop(0, mode === "overall" ? "rgba(255,40,20,.16)" : "rgba(255,40,20,.64)");
     gradient.addColorStop(0.34, mode === "overall" ? "rgba(255,174,20,.10)" : "rgba(255,174,20,.42)");
@@ -1373,7 +1440,11 @@ els.downloadContentButton.addEventListener("click", () => {
   else if (contentBlob) downloadBlob(contentBlob, `viewpulse_content_${timestamp()}.${extensionForMime(contentMime || contentBlob.type, contentKind)}`);
 });
 els.downloadDataButton.addEventListener("click", () => downloadBlob(captureDataBlob(currentCapture()), `viewpulse_data_${timestamp()}.json`));
-window.addEventListener("resize", () => { if (!els.resultsScreen.classList.contains("hidden")) { resizeHeatmap(); drawHeatmap(); drawTimeline(); } });
+window.addEventListener("resize", () => {
+  invalidateCalibrationForViewport();
+  if (!els.resultsScreen.classList.contains("hidden")) { resizeHeatmap(); drawHeatmap(); drawTimeline(); }
+});
+document.addEventListener("fullscreenchange", () => window.setTimeout(invalidateCalibrationForViewport, 0));
 window.addEventListener("pagehide", stopAllStreams);
 
 setPreviewMode("pip");
