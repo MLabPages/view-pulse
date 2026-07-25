@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 
-const [html, app, css, readme, manifestText, serviceWorker, icon] = await Promise.all([
+const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
   readFile("app.js", "utf8"),
   readFile("styles.css", "utf8"),
@@ -9,6 +9,10 @@ const [html, app, css, readme, manifestText, serviceWorker, icon] = await Promis
   readFile("manifest.webmanifest", "utf8"),
   readFile("service-worker.js", "utf8"),
   readFile("icon.svg", "utf8"),
+  readFile("vendor/webeyetrack/webeyetrack.worker.js", "utf8"),
+  readFile("web/model.json", "utf8"),
+  readFile("web/group1-shard1of1.bin"),
+  readFile("vendor/webeyetrack/LICENSE", "utf8"),
 ]);
 const manifest = JSON.parse(manifestText);
 
@@ -25,9 +29,10 @@ const requiredAppMarkers = [
   "sync_ms", "currentSyncMs", "runCalibration", "setPreviewMode", "preview-hidden",
   "drawHeatmap", "drawTimeline", "drawReactionComposite", "exportReaction",
   "content_blob", "rear_blob", "legacy_capture", "indexedDB", "renderLibrary",
-  "navigator.share", "libraryDelete", "schema_version: 4", "currentCaptureGeometry", "recording_geometry",
+  "navigator.share", "libraryDelete", "schema_version: 5", "currentCaptureGeometry", "recording_geometry",
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
-  "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id",
+  "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
+  "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -63,8 +68,12 @@ if (shared?.videoId !== "M7lc1UVf-VE") throw new Error("共有文中のYouTube U
 if (manifest.share_target?.params?.url !== "url" || manifest.share_target?.action !== "./?source=share") throw new Error("PWA共有先設定が不足");
 if (!manifest.icons?.some((item) => item.src === "icon.svg")) throw new Error("PWAアイコン設定が不足");
 if (!serviceWorker.includes("self.clients.claim") || !icon.includes("<svg")) throw new Error("PWA起動に必要なファイルが不足");
+if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopology") || gazeWeights.length < 500_000 || !gazeLicense.includes("MIT")) {
+  throw new Error("専用視線モデルまたはライセンスが不足");
+}
 
 console.log(`OK: ${htmlIds.length}個のUI要素を検証`);
 console.log("OK: 画像・動画選択、内カメ1台解析、同期、表示モード切替、同意保存、結果表示を確認");
 console.log("OK: 旧rear_blob互換、IndexedDBライブラリ、共有・削除、外部送信なしの説明を確認");
 console.log("OK: YouTube URL解析・公式プレイヤー同期・PWA共有先・Netflix除外を確認");
+console.log("OK: WebEyeTrack Worker、視線モデル重み、MITライセンスを確認");
