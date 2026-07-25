@@ -475,25 +475,31 @@ async function runCalibration() {
       observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "視線を合わせています"));
     }
     calibrationModel = fitCalibration(observations);
-    const validations = [];
-    for (let i = 0; i < CALIBRATION_VALIDATION_POINTS.length; i++) {
-      validations.push(await collectCalibrationPoint(CALIBRATION_VALIDATION_POINTS[i], i, CALIBRATION_VALIDATION_POINTS.length, "精度を確認しています"));
-    }
-    const errors = validations.map((point) => {
-      const mapped = mapGaze(point.rawX, point.rawY, point, true);
-      return Math.hypot(mapped.x - point.targetX, mapped.y - point.targetY);
-    });
-    const meanError = errors.reduce((sum, value) => sum + value, 0) / errors.length;
-    const maxError = Math.max(...errors);
-    if (meanError > 0.13 || maxError > 0.24) throw new Error(`精度確認で平均ずれ ${(meanError * 100).toFixed(0)}%`);
     calibrationModel.pose = medianPose(observations);
     calibrationModel.viewport = currentViewport();
-    els.captureHint.textContent = `視線調整が完了しました（確認時の平均ずれ ${(meanError * 100).toFixed(0)}%）`;
+    let qualityMessage = "視線調整が完了しました";
+    try {
+      const validations = [];
+      for (let i = 0; i < CALIBRATION_VALIDATION_POINTS.length; i++) {
+        validations.push(await collectCalibrationPoint(CALIBRATION_VALIDATION_POINTS[i], i, CALIBRATION_VALIDATION_POINTS.length, "精度を確認しています"));
+      }
+      const errors = validations.map((point) => {
+        const mapped = mapGaze(point.rawX, point.rawY, point, true);
+        return Math.hypot(mapped.x - point.targetX, mapped.y - point.targetY);
+      });
+      const meanError = errors.reduce((sum, value) => sum + value, 0) / errors.length;
+      qualityMessage += `（確認時の平均ずれ ${(meanError * 100).toFixed(0)}%）`;
+      if (meanError > 0.18) qualityMessage += "。位置は大まかな目安としてご利用ください";
+    } catch (validationError) {
+      console.warn("Calibration validation skipped", validationError);
+      qualityMessage += "（精度確認は省略されました）";
+    }
+    els.captureHint.textContent = qualityMessage;
     els.calibrateButton.innerHTML = "<span>✓</span>調整済み";
   } catch (error) {
     console.warn(error);
     calibrationModel = null;
-    els.captureHint.textContent = "視線調整を完了できませんでした。端末を固定し、顔を画面側に向けて再度お試しください";
+    els.captureHint.textContent = `視線調整を完了できませんでした（${error.message || "視線を検出できませんでした"}）。端末を固定して再度お試しください`;
   } finally {
     calibrationCollect = null;
     els.calibrationLayer.classList.add("hidden");
@@ -511,11 +517,11 @@ async function collectCalibrationPoint(point, index, total, instruction) {
   await delay(500);
   calibrationCollect = [];
   await delay(1200);
-  if (calibrationCollect.length < 4) throw new Error("視線を十分に検出できませんでした");
+  if (calibrationCollect.length < 3) throw new Error("視線を十分に検出できませんでした");
   const rawX = median(calibrationCollect.map((p) => p.x));
   const rawY = median(calibrationCollect.map((p) => p.y));
   const spread = median(calibrationCollect.map((p) => Math.hypot(p.x - rawX, p.y - rawY)));
-  if (spread > 0.12) throw new Error("視線が安定していませんでした");
+  if (spread > 0.28) throw new Error("視線が大きく動いていました");
   return {
     rawX, rawY, targetX: point.x, targetY: point.y,
     yaw: median(calibrationCollect.map((p) => p.yaw)),
@@ -525,13 +531,14 @@ async function collectCalibrationPoint(point, index, total, instruction) {
 }
 
 function fitCalibration(observations) {
-  const features = observations.map((o) => [o.rawX, o.rawY, o.rawX * o.rawX, o.rawX * o.rawY, o.rawY * o.rawY, 1]);
-  const xtx = Array.from({ length: 6 }, (_, r) => Array.from({ length: 6 }, (_, c) => features.reduce((sum, f) => sum + f[r] * f[c], 0)));
+  const features = observations.map((o) => [o.rawX, o.rawY, 1]);
+  const xtx = Array.from({ length: 3 }, (_, r) => Array.from({ length: 3 }, (_, c) => features.reduce((sum, f) => sum + f[r] * f[c], 0)));
   const solveFor = (key) => {
-    const xty = Array.from({ length: 6 }, (_, r) => features.reduce((sum, f, i) => sum + f[r] * observations[i][key], 0));
+    const xty = Array.from({ length: 3 }, (_, r) => features.reduce((sum, f, i) => sum + f[r] * observations[i][key], 0));
     return solveLinearSystem(xtx.map((row) => [...row]), xty);
   };
-  return { x: solveFor("targetX"), y: solveFor("targetY") };
+  const affineToPolynomial = ([rawX, rawY, offset]) => [rawX, rawY, 0, 0, 0, offset];
+  return { x: affineToPolynomial(solveFor("targetX")), y: affineToPolynomial(solveFor("targetY")) };
 }
 
 function solveLinearSystem(matrix, vector) {
