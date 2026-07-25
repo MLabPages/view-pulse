@@ -17,6 +17,7 @@ const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
 ];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
+const GAZE_VERTICAL_GAIN = 2;
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -87,6 +88,7 @@ let youtubeApiPromise = null;
 let youtubeCapturePlayer = null;
 let youtubeResultPlayer = null;
 let youtubeResultRaf = 0;
+let youtubeResultLastDrawAt = 0;
 
 function showScreen(name) {
   els.setupScreen.classList.toggle("hidden", name !== "setup");
@@ -418,9 +420,10 @@ function mapGaze(rawX, rawY, metrics = null, ignoreMotion = false) {
   if (rawX == null || rawY == null) return null;
   if (calibrationModel) {
     if (!ignoreMotion && metrics && !isCalibrationPoseStable(metrics)) return null;
+    const calibratedY = evaluateCalibration(calibrationModel.y, rawX, rawY);
     return {
       x: clamp(evaluateCalibration(calibrationModel.x, rawX, rawY), 0, 1),
-      y: clamp(evaluateCalibration(calibrationModel.y, rawX, rawY), 0, 1),
+      y: clamp(ignoreMotion ? calibratedY : 0.5 + (calibratedY - 0.5) * GAZE_VERTICAL_GAIN, 0, 1),
       calibrated: true,
     };
   }
@@ -456,6 +459,8 @@ function sampleMetrics(now, metrics) {
     face_detected: metrics?.faceDetected ? 1 : 0,
     gaze_x: round(gaze?.x), gaze_y: round(gaze?.y), gaze_calibrated: gaze?.calibrated ? 1 : 0,
     gaze_excluded_motion: metrics?.faceDetected && metrics?.rawGazeX != null && !gaze ? 1 : 0,
+    raw_gaze_x: round(metrics?.rawGazeX), raw_gaze_y: round(metrics?.rawGazeY),
+    eye_distance: round(metrics?.eyeDistance),
     gaze_zone: gaze ? gazeZone(gaze.x, gaze.y) : "",
     attention: metrics?.attention ?? 0,
     smile: round(metrics?.smile), brow_furrow: round(metrics?.furrow),
@@ -673,6 +678,8 @@ function setPreviewMode(mode) {
   els.hiddenModeButton.classList.toggle("active", hidden);
   els.pipModeButton.setAttribute("aria-pressed", String(!hidden));
   els.hiddenModeButton.setAttribute("aria-pressed", String(hidden));
+  els.pipModeButton.textContent = hidden ? "小窓を再表示" : "小窓表示中";
+  els.hiddenModeButton.textContent = hidden ? "非表示中" : "非表示にする";
   if (frontStream) {
     els.captureHint.textContent = hidden
       ? "内カメ映像を隠して、解析だけを続けています"
@@ -926,16 +933,13 @@ async function prepareResults() {
   if (isYoutube) {
     youtubeResultPlayer?.destroy?.();
     resetYoutubeTarget(els.resultYoutubeWrap, "resultYoutubePlayer");
-    youtubeResultPlayer = await createYoutubePlayer("resultYoutubePlayer", youtubeVideoId, (event) => {
-      if (event.data === window.YT?.PlayerState?.PLAYING) startYoutubeResultLoop();
-      else {
-        cancelAnimationFrame(youtubeResultRaf);
-        drawHeatmap();
-        drawTimeline();
-      }
+    youtubeResultPlayer = await createYoutubePlayer("resultYoutubePlayer", youtubeVideoId, () => {
+      drawHeatmap();
+      drawTimeline();
     });
     const duration = youtubeResultPlayer.getDuration?.() || 0;
     contentDurationMs = duration > 0 ? Math.round(duration * 1000) : contentDurationMs;
+    startYoutubeResultLoop();
   }
   selectTab("view");
   summarizeResults();
@@ -949,13 +953,17 @@ async function prepareResults() {
 
 function startYoutubeResultLoop() {
   cancelAnimationFrame(youtubeResultRaf);
-  const loop = () => {
-    if (contentKind !== "youtube" || youtubeResultPlayer?.getPlayerState?.() !== window.YT?.PlayerState?.PLAYING) return;
-    drawHeatmap();
-    drawTimeline();
+  youtubeResultLastDrawAt = 0;
+  const loop = (now) => {
+    if (contentKind !== "youtube" || els.resultsScreen.classList.contains("hidden")) return;
+    if (now - youtubeResultLastDrawAt >= 100) {
+      youtubeResultLastDrawAt = now;
+      drawHeatmap();
+      drawTimeline();
+    }
     youtubeResultRaf = requestAnimationFrame(loop);
   };
-  loop();
+  youtubeResultRaf = requestAnimationFrame(loop);
 }
 
 function summarizeResults() {
@@ -1288,7 +1296,7 @@ function captureDataBlob(capture) {
       duration_ms: capture.content_duration_ms || contentDurationMs,
     },
     synchronization: capture.content_kind === "image" ? "elapsed_ms" : capture.content_kind === "youtube" ? "youtube_playback_ms" : "content_playback_ms",
-    calibration: capture.calibration_model ? "five-point" : "uncalibrated",
+    calibration: capture.calibration_model ? "nine-point" : "uncalibrated",
     samples: capture.samples || [],
   }, null, 2)], { type: "application/json" });
 }
