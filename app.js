@@ -8,8 +8,9 @@ const LIBRARY_DB_NAME = "viewpulse-library";
 const LIBRARY_DB_VERSION = 1;
 const LIBRARY_STORE = "captures";
 const CALIBRATION_POINTS = [
-  { x: 0.18, y: 0.2 }, { x: 0.82, y: 0.2 }, { x: 0.5, y: 0.5 },
-  { x: 0.18, y: 0.75 }, { x: 0.82, y: 0.75 },
+  { x: 0.15, y: 0.15 }, { x: 0.5, y: 0.15 }, { x: 0.85, y: 0.15 },
+  { x: 0.15, y: 0.5 }, { x: 0.5, y: 0.5 }, { x: 0.85, y: 0.5 },
+  { x: 0.15, y: 0.85 }, { x: 0.5, y: 0.85 }, { x: 0.85, y: 0.85 },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +40,7 @@ const els = {
   metricPositive: $("metricPositive"), metricZone: $("metricZone"),
   reactionUnavailable: $("reactionUnavailable"), reactionAvailable: $("reactionAvailable"),
   reactionCanvas: $("reactionCanvas"), playReactionButton: $("playReactionButton"),
+  pauseReactionButton: $("pauseReactionButton"),
   exportReactionButton: $("exportReactionButton"), exportStatus: $("exportStatus"),
   downloadContentButton: $("downloadContentButton"), downloadDataButton: $("downloadDataButton"),
   shareCaptureButton: $("shareCaptureButton"), saveStatus: $("saveStatus"),
@@ -451,11 +453,15 @@ async function runCalibration() {
       els.calibrationTarget.style.top = `${point.y * 100}%`;
       els.calibrationProgress.textContent = `${i + 1} / ${CALIBRATION_POINTS.length}`;
       calibrationCollect = [];
-      await delay(450);
+      await delay(500);
       calibrationCollect = [];
-      await delay(900);
-      if (calibrationCollect.length < 2) throw new Error("視線を検出できませんでした");
-      observations.push({ rawX: median(calibrationCollect.map((p) => p.x)), rawY: median(calibrationCollect.map((p) => p.y)), targetX: point.x, targetY: point.y });
+      await delay(1200);
+      if (calibrationCollect.length < 4) throw new Error("視線を十分に検出できませんでした");
+      const rawX = median(calibrationCollect.map((p) => p.x));
+      const rawY = median(calibrationCollect.map((p) => p.y));
+      const spread = median(calibrationCollect.map((p) => Math.hypot(p.x - rawX, p.y - rawY)));
+      if (spread > 0.12) throw new Error("視線が安定していませんでした");
+      observations.push({ rawX, rawY, targetX: point.x, targetY: point.y });
     }
     calibrationModel = fitCalibration(observations);
     els.captureHint.textContent = "視線調整が完了しました。記録を開始できます";
@@ -1102,21 +1108,46 @@ function nearestSample(ms) {
 
 async function playReaction() {
   if (!frontBlob) return;
-  els.resultFrontVideo.currentTime = 0;
+  const resume = els.resultFrontVideo.currentTime > 0 && els.resultFrontVideo.paused && !els.resultFrontVideo.ended;
+  if (!resume) els.resultFrontVideo.currentTime = 0;
   if (contentKind === "video") {
-    els.resultContentVideo.currentTime = 0;
+    if (!resume) els.resultContentVideo.currentTime = 0;
     await Promise.allSettled([els.resultFrontVideo.play(), els.resultContentVideo.play()]);
   } else {
     youtubeResultPlayer?.pauseVideo?.();
     await els.resultFrontVideo.play().catch(() => {});
   }
   els.playReactionButton.textContent = "再生中…";
+  els.pauseReactionButton.disabled = false;
+  els.pauseReactionButton.textContent = "一時停止";
   drawReactionFrame();
   els.resultFrontVideo.addEventListener("ended", () => {
     els.resultContentVideo.pause();
     youtubeResultPlayer?.pauseVideo?.();
     els.playReactionButton.textContent = "▶ もう一度再生";
+    els.pauseReactionButton.disabled = true;
   }, { once: true });
+}
+
+function pauseOrStopReaction() {
+  if (!frontBlob || els.pauseReactionButton.disabled) return;
+  if (!els.resultFrontVideo.paused) {
+    els.resultFrontVideo.pause();
+    els.resultContentVideo.pause();
+    youtubeResultPlayer?.pauseVideo?.();
+    cancelAnimationFrame(reactionRaf);
+    drawReactionComposite(els.reactionCanvas.getContext("2d"), els.reactionCanvas, els.resultFrontVideo);
+    els.playReactionButton.textContent = "▶ 再開";
+    els.pauseReactionButton.textContent = "停止して最初に戻す";
+    return;
+  }
+  els.resultFrontVideo.currentTime = 0;
+  els.resultContentVideo.currentTime = 0;
+  cancelAnimationFrame(reactionRaf);
+  drawReactionComposite(els.reactionCanvas.getContext("2d"), els.reactionCanvas, els.resultFrontVideo);
+  els.playReactionButton.textContent = "▶ リアクション映像を再生";
+  els.pauseReactionButton.textContent = "一時停止";
+  els.pauseReactionButton.disabled = true;
 }
 
 async function exportReaction() {
@@ -1329,6 +1360,7 @@ els.resultContentImage.addEventListener("load", () => { resizeHeatmap(); drawHea
 els.heatmapMode.addEventListener("change", drawHeatmap);
 els.timelineCanvas.addEventListener("click", seekFromTimeline);
 els.playReactionButton.addEventListener("click", playReaction);
+els.pauseReactionButton.addEventListener("click", pauseOrStopReaction);
 els.exportReactionButton.addEventListener("click", exportReaction);
 els.shareCaptureButton.addEventListener("click", () => shareStoredCapture(currentCapture()));
 els.downloadContentButton.addEventListener("click", () => {
