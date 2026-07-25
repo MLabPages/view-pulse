@@ -599,6 +599,11 @@ function setPreviewMode(mode) {
   els.hiddenModeButton.classList.toggle("active", hidden);
   els.pipModeButton.setAttribute("aria-pressed", String(!hidden));
   els.hiddenModeButton.setAttribute("aria-pressed", String(hidden));
+  if (frontStream) {
+    els.captureHint.textContent = hidden
+      ? "内カメ映像を隠して、解析だけを続けています"
+      : "内カメ映像を小窓で表示しています";
+  }
 }
 
 function openLibraryDb() {
