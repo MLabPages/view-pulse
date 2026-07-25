@@ -17,7 +17,8 @@ const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
 ];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
-const VALIDATION_WARNING_DIAGONAL_RATIO = 0.18;
+const MAX_VALIDATION_MEAN_DIAGONAL_RATIO = 0.12;
+const MAX_VALIDATION_POINT_DIAGONAL_RATIO = 0.18;
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -509,17 +510,27 @@ async function runCalibration() {
       const meanErrorPx = checks.reduce((sum, point) => sum + point.error_px, 0) / checks.length;
       const maxErrorPx = Math.max(...checks.map((point) => point.error_px));
       const meanDiagonalRatio = meanErrorPx / diagonalPx;
-      calibrationModel.validation = { status: "measured", points: checks, mean_error_px: round(meanErrorPx), max_error_px: round(maxErrorPx), mean_diagonal_ratio: round(meanDiagonalRatio) };
+      const maxDiagonalRatio = maxErrorPx / diagonalPx;
+      const accepted = meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
+        && maxDiagonalRatio <= MAX_VALIDATION_POINT_DIAGONAL_RATIO;
+      calibrationModel.validation = {
+        status: accepted ? "accepted" : "rejected",
+        accepted,
+        points: checks,
+        mean_error_px: round(meanErrorPx), max_error_px: round(maxErrorPx),
+        mean_diagonal_ratio: round(meanDiagonalRatio), max_diagonal_ratio: round(maxDiagonalRatio),
+      };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
-      if (meanDiagonalRatio > VALIDATION_WARNING_DIAGONAL_RATIO) qualityMessage += "。ずれが大きいため、再調整をおすすめします";
+      if (!accepted) qualityMessage += "。精度基準を満たさないため、記録は開始できません。端末を固定して再調整してください";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
-      calibrationModel.validation = { status: "skipped", reason: validationError.message || "unknown" };
-      qualityMessage += "（精度確認は省略されました）";
+      calibrationModel.validation = { status: "unavailable", accepted: false, reason: validationError.message || "unknown" };
+      qualityMessage += "（精度確認を完了できなかったため、記録は開始できません）";
     }
     els.captureHint.textContent = qualityMessage;
-    els.calibrateButton.innerHTML = "<span>✓</span>調整済み";
-    els.recordButton.disabled = false;
+    const accepted = calibrationModel.validation?.accepted === true;
+    els.calibrateButton.innerHTML = accepted ? "<span>✓</span>調整済み" : "<span>◎</span>再調整";
+    els.recordButton.disabled = !accepted;
   } catch (error) {
     console.warn(error);
     calibrationModel = null;
@@ -529,7 +540,7 @@ async function runCalibration() {
     calibrationCollect = null;
     els.calibrationLayer.classList.add("hidden");
     els.calibrateButton.disabled = false;
-    if (!recording) els.recordButton.disabled = !calibrationModel;
+    if (!recording) els.recordButton.disabled = calibrationModel?.validation?.accepted !== true;
   }
 }
 
@@ -644,7 +655,7 @@ function makeRecorder(stream, chunks) {
 
 async function startRecording() {
   if (!frontStream || recording || stopping) return;
-  if (!calibrationModel?.geometry) {
+  if (!calibrationModel?.geometry || calibrationModel.validation?.accepted !== true) {
     els.recordButton.disabled = true;
     els.captureHint.textContent = "視線調整が必要です。動画内の点を見ながら「視線調整」を完了してください";
     return;
