@@ -10,6 +10,31 @@ export function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+export function filterCalibrationSamples(samples, minimumDistance = 0.04) {
+  if (!samples.length) return { samples: [], excludedCount: 0, rawSpread: NaN, spread: NaN };
+  const centerX = median(samples.map((sample) => sample.screenX));
+  const centerY = median(samples.map((sample) => sample.screenY));
+  const ranked = samples.map((sample) => ({
+    sample,
+    distance: Math.hypot(sample.screenX - centerX, sample.screenY - centerY),
+  })).sort((a, b) => a.distance - b.distance);
+  const rawSpread = median(ranked.map((item) => item.distance));
+  const cutoff = Math.max(minimumDistance, rawSpread * 2.5);
+  let kept = ranked.filter((item) => item.distance <= cutoff);
+  // Preserve a usable pair even when one model frame jumps far away.
+  if (kept.length < 2) kept = ranked.slice(0, Math.min(2, ranked.length));
+  const inliers = kept.map((item) => item.sample);
+  const filteredX = median(inliers.map((sample) => sample.screenX));
+  const filteredY = median(inliers.map((sample) => sample.screenY));
+  const spread = median(inliers.map((sample) => Math.hypot(sample.screenX - filteredX, sample.screenY - filteredY)));
+  return {
+    samples: inliers,
+    excludedCount: samples.length - inliers.length,
+    rawSpread,
+    spread,
+  };
+}
+
 function mappingFeatures(screenX, screenY, mapping) {
   const x = (screenX - mapping.center.x) / mapping.scale.x;
   const y = (screenY - mapping.center.y) / mapping.scale.y;

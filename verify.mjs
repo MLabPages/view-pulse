@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -37,6 +37,7 @@ const requiredAppMarkers = [
   "CALIBRATION_BASE_REPEATS = 2", "CALIBRATION_MAX_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
   "adaptive-randomized-nine-point-direct-mapping", "selectDirectGazeMapping", "findUnstableCalibrationTargets", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
+  "excluded_outliers", "raw_spread", "unstable",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -86,6 +87,12 @@ if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopol
 }
 
 if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値計算に失敗");
+const filteredSamples = filterCalibrationSamples([
+  { screenX: 0.2, screenY: 0.2 },
+  { screenX: 0.21, screenY: 0.19 },
+  { screenX: 0.95, screenY: 0.9 },
+]);
+if (filteredSamples.samples.length !== 2 || filteredSamples.excludedCount !== 1) throw new Error("視線外れ値の除外に失敗");
 const syntheticTargets = [0.15, 0.5, 0.85].flatMap((targetY) => [0.15, 0.5, 0.85].map((targetX) => ({
   targetX,
   targetY,
