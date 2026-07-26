@@ -1,5 +1,6 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
+import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -121,6 +122,7 @@ let youtubeCapturePlayer = null;
 let youtubeResultPlayer = null;
 let youtubeResultRaf = 0;
 let youtubeResultLastDrawAt = 0;
+let youtubeContentSync = null;
 
 function showScreen(name) {
   els.setupScreen.classList.toggle("hidden", name !== "setup");
@@ -549,7 +551,13 @@ function startAnalysisLoop() {
       updateMediaPipeGaze(now, latestMetrics);
       requestSpecializedGaze(now);
       updateAnalysisBadge(latestMetrics);
-      if (recording) sampleMetrics(now, latestMetrics);
+      if (recording) {
+        const contentProgress = readYoutubeContentProgress();
+        if (contentKind !== "youtube" || !contentProgress.waiting) {
+          if (contentProgress.startedNow) beginActiveRecording();
+          sampleMetrics(now, latestMetrics, contentProgress);
+        }
+      }
     } catch (error) {
       console.warn("Face analysis skipped", error);
     }
@@ -677,14 +685,33 @@ function currentSyncMs(now = performance.now()) {
   return Math.max(0, Math.round(now - recordStart));
 }
 
-function sampleMetrics(now, metrics) {
-  const gaze = metrics?.faceDetected ? mapGaze(metrics) : null;
+function readYoutubeContentProgress() {
+  if (contentKind !== "youtube" || !youtubeContentSync) return { waiting: false, startedNow: false, validForContent: true, pauseReason: "" };
+  return youtubeContentSync.observe({
+    currentTime: youtubeCapturePlayer?.getCurrentTime?.(),
+    playerState: youtubeCapturePlayer?.getPlayerState?.(),
+    playingState: window.YT?.PlayerState?.PLAYING ?? 1,
+  });
+}
+
+function beginActiveRecording() {
+  recordStart = performance.now();
+  frontRecorder?.start(500);
+  els.recordingBadge.classList.remove("hidden");
+  els.captureHint.textContent = "記録を開始しました";
+  recordTimer = window.setInterval(updateRecordTime, 250);
+  updateRecordTime();
+}
+
+function sampleMetrics(now, metrics, contentProgress = { validForContent: true, pauseReason: "" }) {
+  const contentValid = contentProgress.validForContent !== false;
+  const gaze = contentValid && metrics?.faceDetected ? mapGaze(metrics) : null;
   const poseQuality = metrics?.faceDetected && calibrationModel?.pose
     ? evaluatePoseQuality(metrics, calibrationModel.pose)
     : { level: "unavailable", weight: 0, severity: 0 };
   const mappedOutOfBounds = Boolean(specializedGaze)
     && !resolveMappedGaze(mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY));
-  const gazeMissingReason = gaze ? ""
+  const gazeMissingReason = !contentValid ? "youtube_time_not_advancing" : gaze ? ""
     : !metrics?.faceDetected ? "face_not_detected"
       : poseQuality.level === "excluded" ? "pose_excluded"
         : !specializedGaze ? "model_no_output"
@@ -695,6 +722,8 @@ function sampleMetrics(now, metrics) {
     elapsed_ms: Math.max(0, Math.round(now - recordStart)),
     sync_ms: currentSyncMs(now),
     content_kind: contentKind,
+    gaze_valid_for_content: contentValid ? 1 : 0,
+    pause_reason: contentValid ? "" : contentProgress.pauseReason || "youtube_time_not_advancing",
     face_detected: metrics?.faceDetected ? 1 : 0,
     gaze_x: round(gaze?.x), gaze_y: round(gaze?.y), gaze_calibrated: gaze?.calibrated ? 1 : 0,
     gaze_excluded_motion: gazeMissingReason === "pose_excluded" ? 1 : 0,
@@ -1151,6 +1180,7 @@ async function startRecording() {
   currentCaptureCreatedAt = "";
   frontChunks = [];
   samples = [];
+  youtubeContentSync = contentKind === "youtube" ? createYouTubeContentSync() : null;
   recordingGeometry = calibrationModel.geometry;
   imageTimelineMs = 0;
   frontRecorder = null;
@@ -1169,15 +1199,15 @@ async function startRecording() {
     youtubeCapturePlayer?.seekTo?.(0, true);
     youtubeCapturePlayer?.playVideo?.();
   }
-  recordStart = performance.now();
   recording = true;
-  frontRecorder?.start(500);
   els.recordButton.classList.add("recording");
-  els.recordingBadge.classList.remove("hidden");
-  els.captureHint.textContent = frontRecorder ? "表情映像も端末内に保存しています" : "表情は数値だけ記録し、内カメ映像は保存しません";
+  if (contentKind === "youtube") {
+    els.recordingBadge.classList.add("hidden");
+    els.captureHint.textContent = "動画本編の開始を待っています。広告が表示された場合は，広告終了後に自動で記録を開始します。";
+  } else {
+    beginActiveRecording();
+  }
   els.calibrateButton.disabled = true;
-  recordTimer = window.setInterval(updateRecordTime, 250);
-  updateRecordTime();
 }
 
 async function stopRecording() {
@@ -1185,6 +1215,7 @@ async function stopRecording() {
   stopping = true;
   recording = false;
   clearInterval(recordTimer);
+  youtubeContentSync = null;
   els.contentVideo.pause();
   youtubeCapturePlayer?.pauseVideo?.();
   els.recordButton.disabled = true;
@@ -1192,7 +1223,7 @@ async function stopRecording() {
   const frontType = frontRecorder?.mimeType || "video/webm";
   await stopRecorder(frontRecorder);
   frontBlob = frontChunks.length ? new Blob(frontChunks, { type: frontType }) : null;
-  if (!samples.length) sampleMetrics(performance.now(), latestMetrics);
+  if (!samples.length && contentKind !== "youtube") sampleMetrics(performance.now(), latestMetrics);
   if (contentKind === "video") contentDurationMs = Math.max(contentDurationMs, Math.round((els.contentVideo.duration || 0) * 1000));
   else if (contentKind === "youtube") contentDurationMs = Math.max(contentDurationMs, Math.round((youtubeCapturePlayer?.getDuration?.() || 0) * 1000));
   else contentDurationMs = samples.at(-1)?.elapsed_ms || 0;
@@ -1280,6 +1311,7 @@ function normalizeCapture(record) {
     ...sample,
     sync_ms: Number.isFinite(Number(sample.sync_ms)) ? Number(sample.sync_ms) : number(sample.elapsed_ms),
     content_kind: sample.content_kind || normalizedKind,
+    gaze_valid_for_content: Number(sample.gaze_valid_for_content) === 0 ? 0 : 1,
   }));
   return {
     ...record,
@@ -1538,16 +1570,17 @@ function startYoutubeResultLoop() {
 }
 
 function summarizeResults() {
-  const total = samples.length;
-  const tracked = samples.filter((sample) => sample.face_detected && sample.gaze_x !== "");
-  const positive = samples.filter((sample) => number(sample.smile) >= 0.35);
+  const contentSamples = samples.filter((sample) => sample.gaze_valid_for_content !== 0);
+  const total = contentSamples.length;
+  const tracked = contentSamples.filter((sample) => sample.face_detected && sample.gaze_x !== "");
+  const positive = contentSamples.filter((sample) => number(sample.smile) >= 0.35);
   const zoneCounts = {};
   tracked.forEach((sample) => { zoneCounts[sample.gaze_zone] = (zoneCounts[sample.gaze_zone] || 0) + 1; });
   const topZone = Object.entries(zoneCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
   els.metricTracked.textContent = total ? `${Math.round(tracked.length / total * 100)}%` : "—";
   els.metricPositive.textContent = total ? `${Math.round(positive.length / total * 100)}%` : "—";
   els.metricZone.textContent = zoneLabel(topZone);
-  const seconds = Math.round((samples.at(-1)?.elapsed_ms || 0) / 1000);
+  const seconds = Math.round((contentSamples.at(-1)?.elapsed_ms || 0) / 1000);
   const kindLabel = contentKind === "image" ? "画像" : contentKind === "youtube" ? "YouTube動画" : "動画";
   const qualityStatus = calibrationModel?.validation?.status || samples.find((sample) => sample.gaze_quality)?.gaze_quality;
   const qualityPrefix = qualityStatus === "rejected" ? "低精度の視線推定です。大きな領域（AOI）の傾向として確認してください。" : "";
@@ -1591,7 +1624,7 @@ function drawHeatmap() {
   const mode = els.heatmapMode.value;
   if (mode === "off" || !samples.length) return;
   const t = resultSyncMs();
-  const visible = samples.filter((sample) => sample.gaze_x !== "" && (mode === "overall" || Math.abs(sampleTime(sample) - t) <= HEATMAP_MOMENT_WINDOW_MS));
+  const visible = samples.filter((sample) => sample.gaze_valid_for_content !== 0 && sample.gaze_x !== "" && (mode === "overall" || Math.abs(sampleTime(sample) - t) <= HEATMAP_MOMENT_WINDOW_MS));
   const media = contentKind === "image" ? els.resultContentImage : els.resultContentVideo;
   const rect = contentKind === "youtube"
     ? { x: 0, y: 0, width: canvas.width, height: canvas.height }
@@ -1629,8 +1662,9 @@ function drawTimeline() {
   ctx.lineWidth = 1;
   for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4); ctx.stroke(); }
   const duration = timelineDuration();
-  drawSeries(ctx, samples, duration, w, h, "valence", "#e5ff3f", (value) => 0.5 - number(value) * 0.35);
-  drawSeries(ctx, samples, duration, w, h, "smile", "#ff6f61", (value) => 0.92 - number(value) * 0.72);
+  const contentSamples = samples.filter((sample) => sample.gaze_valid_for_content !== 0);
+  drawSeries(ctx, contentSamples, duration, w, h, "valence", "#e5ff3f", (value) => 0.5 - number(value) * 0.35);
+  drawSeries(ctx, contentSamples, duration, w, h, "smile", "#ff6f61", (value) => 0.92 - number(value) * 0.72);
   const cursorX = clamp(resultSyncMs() / duration, 0, 1) * w;
   ctx.strokeStyle = "rgba(255,255,255,.9)";
   ctx.lineWidth = 2;
