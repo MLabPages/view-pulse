@@ -7,6 +7,10 @@ const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
+const CALIBRATION_MIN_SAMPLES = 3;
+const CALIBRATION_POINT_TIMEOUT_MS = 8000;
+const CALIBRATION_SPREAD_LIMIT = 0.26;
+const CALIBRATION_ADAPT_TIMEOUT_MS = 8000;
 const SPECIALIZED_GAZE_WORKER_URL = new URL("./vendor/webeyetrack/webeyetrack.worker.js", import.meta.url);
 const SPECIALIZED_GAZE_MODEL_URL = new URL("./web/model.json", import.meta.url);
 const LIBRARY_DB_NAME = "viewpulse-library";
@@ -79,6 +83,8 @@ let webEyeLastAt = 0;
 let webEyeCanvas = null;
 let webEyeContext = null;
 let specializedGaze = null;
+let webEyeLastStepError = "";
+let resolveCalibrationAck = null;
 let analysisRunning = false;
 let analysisRaf = 0;
 let lastAnalysisAt = 0;
@@ -401,10 +407,19 @@ function loadSpecializedGazeModel() {
         finish(reject, gazeModelError(`専用視線モデルを読み込めませんでした（${message.message || "原因不明"}）`));
       } else if (message.type === "stepError") {
         webEyeBusy = false;
+        webEyeLastStepError = message.message || "";
         console.warn("Specialized gaze step failed", message.message);
       } else if (message.type === "stepResult") {
         webEyeBusy = false;
         updateSpecializedGaze(message.result);
+      } else if (message.type === "stepSkipped") {
+        webEyeBusy = false;
+      } else if (message.type === "calibrated") {
+        webEyeBusy = false;
+        resolveCalibrationAck?.(true);
+      } else if (message.type === "calibrateError") {
+        webEyeBusy = false;
+        resolveCalibrationAck?.(message.message || "unknown");
       } else if (message.type === "statusUpdate" && message.status === "idle") {
         webEyeBusy = false;
       }
@@ -675,14 +690,22 @@ async function collectCalibrationPoint(point, index, total, instruction, geometr
   els.calibrationTarget.style.top = `${geometry.media.y + point.y * geometry.media.height}px`;
   els.calibrationProgress.textContent = `${index + 1} / ${total}`;
   calibrationCollect = [];
-  await delay(500);
+  await delay(600);
+  // Restart collection so samples from the previous target are never mixed in.
   calibrationCollect = [];
-  await delay(1500);
-  if (calibrationCollect.length < 2) throw new Error("視線を十分に検出できませんでした");
+  webEyeLastStepError = "";
+  const startedAt = performance.now();
+  while (calibrationCollect.length < CALIBRATION_MIN_SAMPLES
+    && performance.now() - startedAt < CALIBRATION_POINT_TIMEOUT_MS) {
+    await delay(120);
+  }
+  if (calibrationCollect.length < CALIBRATION_MIN_SAMPLES) {
+    throw new Error(calibrationPointFailureReason());
+  }
   const screenX = median(calibrationCollect.map((p) => p.screenX));
   const screenY = median(calibrationCollect.map((p) => p.screenY));
   const spread = median(calibrationCollect.map((p) => Math.hypot(p.screenX - screenX, p.screenY - screenY)));
-  if (spread > 0.18) throw new Error("視線が大きく動いていました");
+  if (spread > CALIBRATION_SPREAD_LIMIT) throw new Error("視線が大きく動いていました");
   const observation = {
     screenX, screenY, targetX: point.x, targetY: point.y,
     yaw: median(calibrationCollect.map((p) => p.yaw)),
@@ -692,10 +715,35 @@ async function collectCalibrationPoint(point, index, total, instruction, geometr
   if (trainModel) {
     const target = calibrationTargetToScreen(point, geometry);
     if (!webEyeWorker || !webEyeReady) throw new Error("専用視線モデルとの接続が切れました");
-    webEyeWorker.postMessage({ type: "click", payload: target });
-    await delay(180);
+    const learned = await adaptSpecializedGaze(target);
+    if (learned !== true) throw new Error(`この位置を学習できませんでした（${learned}）`);
   }
+  calibrationCollect = null;
   return observation;
+}
+
+function calibrationPointFailureReason() {
+  if (webEyeLastStepError) return `視線の計算に失敗しました（${webEyeLastStepError}）`;
+  if (!latestMetrics?.faceDetected) return "顔を検出できませんでした";
+  return "視線を十分に検出できませんでした";
+}
+
+function adaptSpecializedGaze(target) {
+  // The worker trains on its own latest frame, so wait for its explicit reply
+  // instead of guessing how long adaptation takes on this machine.
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolveCalibrationAck = null;
+      resolve(value);
+    };
+    const timeout = window.setTimeout(() => finish("時間内に応答がありませんでした"), CALIBRATION_ADAPT_TIMEOUT_MS);
+    resolveCalibrationAck = finish;
+    webEyeWorker.postMessage({ type: "calibrate", payload: target });
+  });
 }
 
 function calibrationTargetToScreen(point, geometry) {
