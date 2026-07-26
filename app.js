@@ -647,13 +647,20 @@ function sampleMetrics(now, metrics) {
   const poseQuality = metrics?.faceDetected && calibrationModel?.pose
     ? evaluatePoseQuality(metrics, calibrationModel.pose)
     : { level: "unavailable", weight: 0, severity: 0 };
+  const gazeMissingReason = gaze ? ""
+    : !metrics?.faceDetected ? "face_not_detected"
+      : poseQuality.level === "excluded" ? "pose_excluded"
+        : !specializedGaze ? "model_no_output"
+          : performance.now() - specializedGaze.receivedAt > SPECIALIZED_GAZE_MAX_AGE_MS ? "model_output_stale"
+            : "mapping_failed";
   samples.push({
     elapsed_ms: Math.max(0, Math.round(now - recordStart)),
     sync_ms: currentSyncMs(now),
     content_kind: contentKind,
     face_detected: metrics?.faceDetected ? 1 : 0,
     gaze_x: round(gaze?.x), gaze_y: round(gaze?.y), gaze_calibrated: gaze?.calibrated ? 1 : 0,
-    gaze_excluded_motion: metrics?.faceDetected && specializedGaze && !gaze ? 1 : 0,
+    gaze_excluded_motion: gazeMissingReason === "pose_excluded" ? 1 : 0,
+    gaze_missing_reason: gazeMissingReason,
     gaze_pose_quality: gaze?.poseQuality?.level || poseQuality.level,
     gaze_weight: round(gaze?.poseQuality?.weight ?? 0),
     gaze_pose_deviation: round(poseQuality.severity),
