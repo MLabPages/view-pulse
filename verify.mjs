@@ -34,8 +34,8 @@ const requiredAppMarkers = [
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
   "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
-  "CALIBRATION_BASE_REPEATS = 2", "CALIBRATION_MAX_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
-  "adaptive-randomized-nine-point-direct-mapping", "selectDirectGazeMapping", "findUnstableCalibrationTargets", "gaze_quality",
+  "CALIBRATION_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 2", "CALIBRATION_MAX_SAMPLES = 5",
+  "randomized-three-pass-nine-point-direct-mapping", "selectDirectGazeMapping", "calibrationRequiredSamples", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
   "excluded_outliers", "raw_spread", "unstable",
 ];
@@ -112,4 +112,4 @@ console.log("OK: 画像・動画選択、内カメ1台解析、同期、表示�
 console.log("OK: 旧rear_blob互換、IndexedDBライブラリ、共有・削除、外部送信なしの説明を確認");
 console.log("OK: YouTube URL解析・公式プレイヤー同期・PWA共有先・Netflix除外を確認");
 console.log("OK: WebEyeTrack Worker、視線モデル重み、MITライセンスを確認");
-console.log("OK: 適応型キャリブレーションの中央値・モデル選択・座標変換を数値検証");
+console.log("OK: 複数回キャリブレーションの中央値・モデル選択・座標変換を数値検証");
