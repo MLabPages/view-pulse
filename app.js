@@ -8,10 +8,8 @@ const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
-const CALIBRATION_BASE_REPEATS = 2;
-const CALIBRATION_MAX_REPEATS = 3;
-const CALIBRATION_REPEAT_DIFFERENCE_LIMIT = 0.045;
-const CALIBRATION_MIN_SAMPLES = 3;
+const CALIBRATION_REPEATS = 3;
+const CALIBRATION_MIN_SAMPLES = 2;
 const CALIBRATION_MAX_SAMPLES = 5;
 const CALIBRATION_SETTLE_MS = 450;
 const CALIBRATION_POINT_TIMEOUT_MS = 20000;
@@ -655,21 +653,10 @@ async function runCalibration() {
   try {
     webEyeEyesClosed = 0;
     const automatic = usesAutomaticCalibration();
-    const sequence = buildCalibrationSequence(CALIBRATION_BASE_REPEATS);
+    const sequence = buildCalibrationSequence();
     for (let i = 0; i < sequence.length; i++) {
       const item = sequence[i];
       observations.push(await collectCalibrationTrial(item, i, sequence.length, geometry, automatic));
-    }
-    const additionalTargets = shuffleCalibrationPoints(findUnstableCalibrationTargets(observations));
-    for (let i = 0; i < additionalTargets.length; i++) {
-      observations.push(await collectCalibrationTrial(
-        { ...additionalTargets[i], repeat: CALIBRATION_MAX_REPEATS },
-        i,
-        additionalTargets.length,
-        geometry,
-        automatic,
-        "ばらつきの大きい点を追加確認しています",
-      ));
     }
     const representatives = summarizeCalibrationPoints(observations);
     const directMapping = selectDirectGazeMapping(representatives);
@@ -678,15 +665,11 @@ async function runCalibration() {
       engine: "webeyetrack",
       engine_version: "0.0.2",
       backend: webEyeBackend,
-      method: "adaptive-randomized-nine-point-direct-mapping",
+      method: "randomized-three-pass-nine-point-direct-mapping",
       calibration_points: CALIBRATION_POINTS.length,
-      calibration_repeats: {
-        base: CALIBRATION_BASE_REPEATS,
-        maximum: CALIBRATION_MAX_REPEATS,
-        additional_points: additionalTargets.map((point) => ({ x: point.x, y: point.y })),
-      },
+      calibration_repeats: CALIBRATION_REPEATS,
       calibration_trials: observations.length,
-      samples_per_trial: { minimum: CALIBRATION_MIN_SAMPLES, maximum: CALIBRATION_MAX_SAMPLES },
+      samples_per_trial: { minimum: calibrationRequiredSamples(), maximum: CALIBRATION_MAX_SAMPLES },
       confirmation: automatic ? "automatic" : "click",
       pose: medianPose(observations),
       viewport: currentViewport(),
@@ -769,7 +752,7 @@ function shuffleCalibrationPoints(points) {
   return shuffled;
 }
 
-function buildCalibrationSequence(repeats = CALIBRATION_BASE_REPEATS) {
+function buildCalibrationSequence(repeats = CALIBRATION_REPEATS) {
   const sequence = [];
   for (let repeat = 0; repeat < repeats; repeat++) {
     const batch = shuffleCalibrationPoints(CALIBRATION_POINTS);
@@ -781,17 +764,8 @@ function buildCalibrationSequence(repeats = CALIBRATION_BASE_REPEATS) {
   return sequence;
 }
 
-function findUnstableCalibrationTargets(observations) {
-  return CALIBRATION_POINTS.filter((target) => {
-    const trials = observations.filter((point) => point.targetX === target.x && point.targetY === target.y);
-    if (trials.length < CALIBRATION_BASE_REPEATS) return true;
-    const first = trials[0];
-    const second = trials[1];
-    const repeatDifference = Math.hypot(first.screenX - second.screenX, first.screenY - second.screenY);
-    const unstableTrial = trials.some((trial) => trial.unstable);
-    const withinTrialSpread = Math.max(...trials.map((trial) => trial.spread || 0));
-    return unstableTrial || repeatDifference > CALIBRATION_REPEAT_DIFFERENCE_LIMIT || withinTrialSpread > CALIBRATION_REPEAT_DIFFERENCE_LIMIT;
-  });
+function calibrationRequiredSamples() {
+  return webEyeBackend === "cpu" ? CALIBRATION_MIN_SAMPLES : 3;
 }
 
 async function collectCalibrationTrial(point, index, total, geometry, automatic, instruction = "") {
@@ -807,13 +781,14 @@ async function collectCalibrationTrial(point, index, total, geometry, automatic,
   calibrationCollectAfter = performance.now();
   webEyeLastStepError = "";
   webEyeEyesClosed = 0;
+  const requiredSamples = calibrationRequiredSamples();
   const startedAt = performance.now();
-  while (calibrationCollect.length < CALIBRATION_MIN_SAMPLES
+  while (calibrationCollect.length < requiredSamples
     && performance.now() - startedAt < CALIBRATION_POINT_TIMEOUT_MS) {
-    els.calibrationProgress.textContent = `${index + 1} / ${total}・視線 ${Math.min(calibrationCollect.length, CALIBRATION_MIN_SAMPLES)} / ${CALIBRATION_MIN_SAMPLES}`;
+    els.calibrationProgress.textContent = `${index + 1} / ${total}・視線 ${Math.min(calibrationCollect.length, requiredSamples)} / ${requiredSamples}`;
     await delay(120);
   }
-  if (calibrationCollect.length < CALIBRATION_MIN_SAMPLES) {
+  if (calibrationCollect.length < requiredSamples) {
     throw new Error(calibrationPointFailureReason());
   }
   if (automatic) {
@@ -837,7 +812,7 @@ async function collectCalibrationTrial(point, index, total, geometry, automatic,
   const screenX = median(used.map((sample) => sample.screenX));
   const screenY = median(used.map((sample) => sample.screenY));
   const unstable = filtered.rawSpread > CALIBRATION_SPREAD_LIMIT
-    || filtered.spread > CALIBRATION_REPEAT_DIFFERENCE_LIMIT
+    || filtered.spread > 0.08
     || filtered.excludedCount > 0;
   return {
     screenX, screenY, targetX: point.x, targetY: point.y,
@@ -879,7 +854,7 @@ function waitForCalibrationTargetClick(timeoutMs) {
 function summarizeCalibrationPoints(observations) {
   return CALIBRATION_POINTS.map((target) => {
     const trials = observations.filter((point) => point.targetX === target.x && point.targetY === target.y);
-    if (trials.length < CALIBRATION_BASE_REPEATS) throw new Error("同じ注視点を2回確認できませんでした");
+    if (trials.length < CALIBRATION_REPEATS) throw new Error("同じ注視点を3回確認できませんでした");
     return {
       screenX: median(trials.map((point) => point.screenX)),
       screenY: median(trials.map((point) => point.screenY)),
