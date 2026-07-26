@@ -7,10 +7,12 @@ const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
-const CALIBRATION_MIN_SAMPLES = 3;
-const CALIBRATION_POINT_TIMEOUT_MS = 8000;
+const CALIBRATION_MIN_SAMPLES = 2;
+const CALIBRATION_POINT_TIMEOUT_MS = 10000;
 const CALIBRATION_SPREAD_LIMIT = 0.26;
-const CALIBRATION_ADAPT_TIMEOUT_MS = 8000;
+const CALIBRATION_SAMPLE_TIMEOUT_MS = 6000;
+const CALIBRATION_FIT_TIMEOUT_MS = 25000;
+const SPECIALIZED_GAZE_CAPTURE_WIDTH = 640;
 const SPECIALIZED_GAZE_WORKER_URL = new URL("./vendor/webeyetrack/webeyetrack.worker.js", import.meta.url);
 const SPECIALIZED_GAZE_MODEL_URL = new URL("./web/model.json", import.meta.url);
 const LIBRARY_DB_NAME = "viewpulse-library";
@@ -84,7 +86,11 @@ let webEyeCanvas = null;
 let webEyeContext = null;
 let specializedGaze = null;
 let webEyeLastStepError = "";
-let resolveCalibrationAck = null;
+let webEyeBackend = "";
+let webEyeEyesClosed = 0;
+let pendingSampleAck = null;
+let pendingFitAck = null;
+let calibrationFitting = false;
 let analysisRunning = false;
 let analysisRaf = 0;
 let lastAnalysisAt = 0;
@@ -401,6 +407,7 @@ function loadSpecializedGazeModel() {
       const message = event.data || {};
       if (message.type === "ready") {
         webEyeReady = true;
+        webEyeBackend = message.backend || "";
         finish(resolve);
       } else if (message.type === "initError") {
         webEyeReady = false;
@@ -414,12 +421,16 @@ function loadSpecializedGazeModel() {
         updateSpecializedGaze(message.result);
       } else if (message.type === "stepSkipped") {
         webEyeBusy = false;
+      } else if (message.type === "sampleCollected") {
+        pendingSampleAck?.(true);
+      } else if (message.type === "sampleError") {
+        pendingSampleAck?.(message.message || "unknown");
       } else if (message.type === "calibrated") {
         webEyeBusy = false;
-        resolveCalibrationAck?.(true);
+        pendingFitAck?.(true);
       } else if (message.type === "calibrateError") {
         webEyeBusy = false;
-        resolveCalibrationAck?.(message.message || "unknown");
+        pendingFitAck?.(message.message || "unknown");
       } else if (message.type === "statusUpdate" && message.status === "idle") {
         webEyeBusy = false;
       }
@@ -451,10 +462,21 @@ function stopSpecializedGazeModel() {
   specializedGaze = null;
   webEyeCanvas = null;
   webEyeContext = null;
+  webEyeBackend = "";
+  webEyeEyesClosed = 0;
+  pendingSampleAck = null;
+  pendingFitAck = null;
+  calibrationFitting = false;
 }
 
 function updateSpecializedGaze(result) {
-  if (!result?.facialLandmarks?.length || result.gazeState !== "open" || !Array.isArray(result.normPog)) {
+  if (!result?.facialLandmarks?.length || !Array.isArray(result.normPog)) {
+    specializedGaze = null;
+    return;
+  }
+  if (result.gazeState !== "open") {
+    // Blinks are normal; remember them so failures can name the real cause.
+    webEyeEyesClosed += 1;
     specializedGaze = null;
     return;
   }
@@ -475,10 +497,11 @@ function updateSpecializedGaze(result) {
 }
 
 function requestSpecializedGaze(now) {
-  if (!webEyeReady || webEyeBusy || !webEyeWorker || els.frontPreview.readyState < 2) return;
+  if (!webEyeReady || webEyeBusy || calibrationFitting || !webEyeWorker || els.frontPreview.readyState < 2) return;
   if (now - webEyeLastAt < SPECIALIZED_GAZE_INTERVAL_MS) return;
   webEyeLastAt = now;
-  const width = 384;
+  // A wider frame keeps the eye region detailed enough for the gaze model.
+  const width = SPECIALIZED_GAZE_CAPTURE_WIDTH;
   const height = Math.max(2, Math.round(width * els.frontPreview.videoHeight / Math.max(els.frontPreview.videoWidth, 1)));
   if (!webEyeCanvas) {
     webEyeCanvas = document.createElement("canvas");
@@ -620,12 +643,19 @@ async function runCalibration() {
   els.calibrationLayer.classList.remove("hidden");
   const observations = [];
   try {
+    webEyeEyesClosed = 0;
+    resetSpecializedGazeCalibration();
     for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
       observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "動画内の点を見てください", geometry, true));
     }
+    els.calibrationInstruction.textContent = "視線を学習しています…";
+    els.calibrationProgress.textContent = "学習中";
+    const fitted = await fitSpecializedGazeCalibration();
+    if (fitted !== true) throw new Error(`視線の学習に失敗しました（${fitted}）`);
     calibrationModel = {
       engine: "webeyetrack",
       engine_version: "0.0.2",
+      backend: webEyeBackend,
       calibration_points: CALIBRATION_POINTS.length,
       pose: medianPose(observations),
       viewport: currentViewport(),
@@ -715,8 +745,8 @@ async function collectCalibrationPoint(point, index, total, instruction, geometr
   if (trainModel) {
     const target = calibrationTargetToScreen(point, geometry);
     if (!webEyeWorker || !webEyeReady) throw new Error("専用視線モデルとの接続が切れました");
-    const learned = await adaptSpecializedGaze(target);
-    if (learned !== true) throw new Error(`この位置を学習できませんでした（${learned}）`);
+    const captured = await captureCalibrationSample(target);
+    if (captured !== true) throw new Error(`この位置を記録できませんでした（${captured}）`);
   }
   calibrationCollect = null;
   return observation;
@@ -725,24 +755,48 @@ async function collectCalibrationPoint(point, index, total, instruction, geometr
 function calibrationPointFailureReason() {
   if (webEyeLastStepError) return `視線の計算に失敗しました（${webEyeLastStepError}）`;
   if (!latestMetrics?.faceDetected) return "顔を検出できませんでした";
+  if (webEyeEyesClosed > 0) return "目が閉じていると判定されました。明るい場所で、目を大きく開いてお試しください";
   return "視線を十分に検出できませんでした";
 }
 
-function adaptSpecializedGaze(target) {
-  // The worker trains on its own latest frame, so wait for its explicit reply
-  // instead of guessing how long adaptation takes on this machine.
+function captureCalibrationSample(target) {
+  // Snapshot only. Training is deferred until every target has been shown.
+  return workerRequest(
+    { type: "collectSample", payload: target },
+    (finish) => { pendingSampleAck = finish; },
+    () => { pendingSampleAck = null; },
+    CALIBRATION_SAMPLE_TIMEOUT_MS,
+  );
+}
+
+function fitSpecializedGazeCalibration() {
+  // One training pass over all nine targets, so slow machines pay the cost once.
+  calibrationFitting = true;
+  return workerRequest(
+    { type: "fitCalibration", payload: { steps: 1 } },
+    (finish) => { pendingFitAck = finish; },
+    () => { pendingFitAck = null; calibrationFitting = false; },
+    CALIBRATION_FIT_TIMEOUT_MS,
+  );
+}
+
+function resetSpecializedGazeCalibration() {
+  webEyeWorker?.postMessage({ type: "resetCalibration" });
+}
+
+function workerRequest(message, register, cleanup, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      resolveCalibrationAck = null;
+      cleanup();
       resolve(value);
     };
-    const timeout = window.setTimeout(() => finish("時間内に応答がありませんでした"), CALIBRATION_ADAPT_TIMEOUT_MS);
-    resolveCalibrationAck = finish;
-    webEyeWorker.postMessage({ type: "calibrate", payload: target });
+    const timeout = window.setTimeout(() => finish("時間内に応答がありませんでした"), timeoutMs);
+    register(finish);
+    webEyeWorker.postMessage(message);
   });
 }
 
