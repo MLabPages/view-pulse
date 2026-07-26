@@ -783,17 +783,22 @@ async function runCalibration() {
       const meanDiagonalRatio = meanErrorPx / diagonalPx;
       const maxDiagonalRatio = maxErrorPx / diagonalPx;
       const axesUsable = axisSeparation.horizontal_separated && axisSeparation.vertical_separated;
-      const accepted = axesUsable && meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
+      // Held-out confirmation points are the primary accuracy test. Axis separation is
+      // a diagnostic, because small but consistent iris motion can still map accurately.
+      const accepted = meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
         && maxDiagonalRatio <= MAX_VALIDATION_POINT_DIAGONAL_RATIO;
       calibrationModel.validation = {
-        status: !axesUsable ? "unusable" : accepted ? "accepted" : "rejected",
+        status: accepted ? "accepted" : !axesUsable ? "unusable" : "rejected",
         accepted,
         points: checks,
         mean_error_px: round(meanErrorPx), max_error_px: round(maxErrorPx),
         mean_diagonal_ratio: round(meanDiagonalRatio), max_diagonal_ratio: round(maxDiagonalRatio),
       };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
-      if (!axesUsable) {
+      if (accepted && !axesUsable) {
+        const weakAxes = [!axisSeparation.horizontal_separated ? "左右" : "", !axisSeparation.vertical_separated ? "上下" : ""].filter(Boolean).join("・");
+        qualityMessage += `。${weakAxes}方向の生特徴の差は小さいものの、確認点の精度基準を満たしたため記録できます。`;
+      } else if (!axesUsable) {
         const failedAxes = [!axisSeparation.horizontal_separated ? "左右" : "", !axisSeparation.vertical_separated ? "上下" : ""].filter(Boolean).join("・");
         qualityMessage += `。${failedAxes}方向を識別できなかったため記録を開始できません。正面を保って再調整してください。`;
       } else if (!accepted) qualityMessage += "。低精度として記録できます。細かな注視点ではなく、大きな領域（AOI）の傾向として扱ってください。";

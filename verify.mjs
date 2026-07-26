@@ -40,6 +40,7 @@ const requiredAppMarkers = [
   "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
   "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "gaze_missing_reason", "model_output_stale", "renderRecordingFaceGuide", "左上の枠と点を合わせてください",
   'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "方向を識別できなかったため記録を開始できません", "mapped_out_of_bounds",
+  "確認点の精度基準を満たしたため記録できます",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
