@@ -77,6 +77,7 @@ h1 span { color: var(--accent); }
 .capture-screen { position: fixed; inset: 0; background: #000; overflow: hidden; }
 .content-stage { position: absolute; inset: 0; display: grid; place-items: center; background: #000; }
 .content-stage img, .content-stage video { width: 100%; height: 100%; object-fit: contain; }
+.content-stage .content-withheld { visibility: hidden; }
 .youtube-player-wrap { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
 .youtube-player-wrap iframe, .youtube-player-wrap > div { width: 100%; height: 100%; border: 0; }
 .front-preview { position: absolute; z-index: 3; object-fit: cover; transform: scaleX(-1); transition: opacity .2s, transform .2s; }
@@ -148,6 +149,21 @@ h1 span { color: var(--accent); }
 .video-stage video, .video-stage img, .video-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .video-stage video, .video-stage img { object-fit: contain; }
 .video-stage canvas { z-index: 3; pointer-events: none; }
+.aoi-overlay { position: absolute; inset: 0; z-index: 4; cursor: crosshair; touch-action: none; }
+.aoi-overlay.hidden { display: none; }
+.aoi-box { position: absolute; border: 2px solid var(--accent); background: rgba(229,255,63,.12); color: #fff; min-width: 18px; min-height: 18px; cursor: move; }
+.aoi-box span { position: absolute; top: 100%; left: 0; padding: 3px 6px; border-radius: 0 0 6px 6px; background: rgba(0,0,0,.72); font-size: 10px; white-space: nowrap; }
+.aoi-resize { position: absolute; right: -5px; bottom: -5px; width: 12px; height: 12px; border: 0; background: var(--accent); cursor: nwse-resize; }
+.analysis-toolbar { display: flex; gap: 12px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.analysis-toolbar select { background: #272b34; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 7px; margin-left: 7px; }
+.analysis-detail { margin: 15px 0; padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 22px; }
+.segment-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-top: 14px; }
+.segment-card { overflow: hidden; padding: 0; border: 1px solid var(--line); border-radius: 12px; background: #15171d; color: var(--ink); text-align: left; cursor: pointer; }
+.segment-card.active { outline: 2px solid var(--accent); }
+.segment-frame { position: relative; aspect-ratio: 16 / 9; background: #000; }.segment-frame img, .segment-frame canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }.segment-frame canvas { pointer-events: none; }
+.segment-card small { display: block; padding: 8px 10px 0; color: var(--muted); }.segment-card strong { display: block; padding: 3px 10px 10px; font-size: 12px; }
+.segment-detail { min-height: 20px; color: var(--accent); font-size: 12px; }
+.aoi-list { display: grid; gap: 9px; margin-top: 13px; }.aoi-row { display: grid; grid-template-columns: minmax(90px,1fr) auto; gap: 10px; align-items: start; padding: 11px; border: 1px solid var(--line); border-radius: 12px; }.aoi-row strong,.aoi-row small { display: block; }.aoi-row small { color: var(--muted); font-size: 11px; line-height: 1.6; }.aoi-row button { border: 1px solid var(--line); border-radius: 8px; background: #272b34; color: #fff; padding: 7px; }
 .video-stage .youtube-player-wrap { z-index: 1; }
 .viewer-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 13px 16px; color: var(--muted); font-size: 12px; gap: 12px; }
 .viewer-toolbar select { background: #272b34; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 7px; margin-left: 7px; }
@@ -210,6 +226,8 @@ h1 span { color: var(--accent); }
   .insight-grid { grid-template-columns: 1fr; }
   .section-title { display: block; }
   .viewer-toolbar { align-items: flex-start; flex-direction: column; }
+  .analysis-toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .segment-grid { display: flex; overflow-x: auto; }.segment-card { flex: 0 0 210px; }
   .camera-actions { grid-template-columns: 1fr 84px 1fr; gap: 7px; }
   .record-button { width: 76px; height: 76px; }
   .timeline-card { padding: 16px 10px; }

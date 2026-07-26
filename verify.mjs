@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
+import { calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -44,6 +45,7 @@ const requiredAppMarkers = [
   "3段階の順序と確認点の精度基準を満たしたため記録できます", "vertical_error", "verticalOrderConsistent",
   "resolveMappedGaze", "gaze_at_edge", "gaze_edge_overflow",
   "createYouTubeContentSync", "gaze_valid_for_content", "pause_reason", "youtube_time_not_advancing", "動画本編の開始を待っています", "記録を開始しました",
+  "heatmap_segment_seconds", "heatmap_segments", "image_presented_at", "image_elapsed_ms", "aoi_regions", "推定初回到達時間", "AOI_MIN_DWELL_MS", "content-withheld",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -89,6 +91,13 @@ if (shared?.videoId !== "M7lc1UVf-VE") throw new Error("共有文中のYouTube U
 if (manifest.share_target?.params?.url !== "url" || manifest.share_target?.action !== "./?source=share") throw new Error("PWA共有先設定が不足");
 if (!manifest.icons?.some((item) => item.src === "icon.svg")) throw new Error("PWAアイコン設定が不足");
 if (!serviceWorker.includes("self.clients.claim") || !icon.includes("<svg")) throw new Error("PWA起動に必要なファイルが不足");
+const segments = segmentSamples([{ sync_ms: 0, gaze_x: .2, gaze_y: .3 }, { sync_ms: 5100, gaze_x: "", gaze_y: "" }], 5, 10_000);
+if (segments.length !== 2 || segments[0].valid_gaze_samples !== 1 || segments[1].start_ms !== 5000) throw new Error("時間帯別ヒートマップの区切り集計に失敗");
+const aoiCheck = calculateAoiMetrics({ id: "a", x: .1, y: .1, width: .4, height: .4 }, [
+  { image_elapsed_ms: 0, gaze_x: .2, gaze_y: .2 }, { image_elapsed_ms: 200, gaze_x: .2, gaze_y: .2 },
+  { image_elapsed_ms: 400, gaze_x: "", gaze_y: "" }, { image_elapsed_ms: 600, gaze_x: .2, gaze_y: .2 },
+], { intervalMs: 200 });
+if (aoiCheck.entries !== 1 || aoiCheck.dwell_ms !== 800 || aoiCheck.first_arrival_ms !== 0) throw new Error("AOIの簡易滞在ルールに失敗");
 if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopology") || gazeWeights.length < 500_000 || !gazeLicense.includes("MIT")) {
   throw new Error("専用視線モデルまたはライセンスが不足");
 }

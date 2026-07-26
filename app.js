@@ -1,6 +1,7 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
+import { AOI_MIN_DWELL_MS, AOI_MISSING_GAP_MS, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -32,6 +33,8 @@ const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
 ];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
+const HEATMAP_SEGMENT_DEFAULT_SECONDS = 10;
+const IMAGE_FIXATION_MS = 500;
 const MAX_VALIDATION_MEAN_DIAGONAL_RATIO = 0.12;
 const MAX_VALIDATION_POINT_DIAGONAL_RATIO = 0.18;
 
@@ -61,6 +64,8 @@ const els = {
   resultContentImage: $("resultContentImage"), resultContentVideo: $("resultContentVideo"), resultFrontVideo: $("resultFrontVideo"),
   resultYoutubeWrap: $("resultYoutubeWrap"), youtubeReactionNote: $("youtubeReactionNote"),
   viewStage: $("viewStage"), heatmapCanvas: $("heatmapCanvas"), heatmapMode: $("heatmapMode"),
+  analysisMode: $("analysisMode"), segmentSeconds: $("segmentSeconds"), segmentPanel: $("segmentPanel"), segmentGrid: $("segmentGrid"), segmentDetail: $("segmentDetail"),
+  aoiPanel: $("aoiPanel"), aoiOverlay: $("aoiOverlay"), aoiList: $("aoiList"), aoiHelp: $("aoiHelp"),
   timelineCanvas: $("timelineCanvas"), timelineHelp: $("timelineHelp"), metricTracked: $("metricTracked"),
   metricPositive: $("metricPositive"), metricZone: $("metricZone"),
   reactionUnavailable: $("reactionUnavailable"), reactionAvailable: $("reactionAvailable"),
@@ -117,6 +122,11 @@ let currentCaptureId = "";
 let currentCaptureCreatedAt = "";
 let libraryObjectUrls = [];
 let imageTimelineMs = 0;
+let imagePresentedAt = "";
+let imageAwaitingStart = false;
+let heatmapSegmentSeconds = HEATMAP_SEGMENT_DEFAULT_SECONDS;
+let activeHeatmapSegment = null;
+let aoiRegions = [];
 let youtubeApiPromise = null;
 let youtubeCapturePlayer = null;
 let youtubeResultPlayer = null;
@@ -350,6 +360,9 @@ async function mountSelectedContent() {
   els.contentTypeBadge.textContent = isImage ? "IMAGE" : isYoutube ? "YOUTUBE" : "VIDEO";
   if (isImage) {
     els.contentImage.src = selectedUrl;
+    els.contentImage.classList.add("content-withheld");
+    imageAwaitingStart = true;
+    imagePresentedAt = "";
     els.contentVideo.removeAttribute("src");
     els.contentVideo.load();
   } else if (!isYoutube) {
@@ -720,6 +733,7 @@ function sampleMetrics(now, metrics, contentProgress = { validForContent: true, 
             : "mapping_failed";
   samples.push({
     elapsed_ms: Math.max(0, Math.round(now - recordStart)),
+    image_elapsed_ms: contentKind === "image" ? Math.max(0, Math.round(now - recordStart)) : "",
     sync_ms: currentSyncMs(now),
     content_kind: contentKind,
     gaze_valid_for_content: contentValid ? 1 : 0,
@@ -1192,13 +1206,16 @@ async function startRecording() {
       els.captureHint.textContent = "この端末では表情映像を保存できないため、数値解析だけ記録します";
     }
   }
-  if (contentKind === "video") {
+  if (contentKind === "image") {
+    await beginImagePresentation();
+  } else if (contentKind === "video") {
     els.contentVideo.currentTime = 0;
     try { await els.contentVideo.play(); } catch (error) { console.warn("Content playback needs another tap", error); }
   } else if (contentKind === "youtube") {
     youtubeCapturePlayer?.seekTo?.(0, true);
     youtubeCapturePlayer?.playVideo?.();
   }
+  if (contentKind === "image") return;
   recording = true;
   els.recordButton.classList.add("recording");
   if (contentKind === "youtube") {
@@ -1207,6 +1224,27 @@ async function startRecording() {
   } else {
     beginActiveRecording();
   }
+  els.calibrateButton.disabled = true;
+}
+
+async function beginImagePresentation() {
+  els.recordButton.disabled = true;
+  els.captureHint.textContent = "中央の点を見てください";
+  els.calibrationLayer.classList.remove("hidden");
+  els.calibrationTarget.classList.remove("aligning", "ready");
+  els.calibrationTarget.disabled = true;
+  els.calibrationTarget.style.left = "50%";
+  els.calibrationTarget.style.top = "50%";
+  els.calibrationInstruction.textContent = "中央の点を見てください";
+  els.calibrationProgress.textContent = "まもなく開始";
+  await delay(IMAGE_FIXATION_MS);
+  els.calibrationLayer.classList.add("hidden");
+  els.contentImage.classList.remove("content-withheld");
+  imageAwaitingStart = false;
+  imagePresentedAt = new Date().toISOString();
+  recording = true;
+  els.recordButton.classList.add("recording");
+  beginActiveRecording();
   els.calibrateButton.disabled = true;
 }
 
@@ -1322,6 +1360,11 @@ function normalizeCapture(record) {
     content_url: record.content_url || "",
     youtube_video_id: record.youtube_video_id || (record.content_kind === "youtube" ? extractYouTubeVideoId(record.content_url) : ""),
     duration_ms: record.duration_ms || normalizedSamples.at(-1)?.elapsed_ms || 0,
+    image_presented_at: record.image_presented_at || "",
+    heatmap_segment_seconds: Number(record.heatmap_segment_seconds) || HEATMAP_SEGMENT_DEFAULT_SECONDS,
+    aoi_regions: Array.isArray(record.aoi_regions) ? record.aoi_regions : [],
+    aoi_metrics: Array.isArray(record.aoi_metrics) ? record.aoi_metrics : [],
+    heatmap_segments: Array.isArray(record.heatmap_segments) ? record.heatmap_segments : [],
     samples: normalizedSamples,
     legacy_capture: legacy,
   };
@@ -1368,8 +1411,13 @@ async function saveCurrentCapture(thumbnail) {
     front_blob: frontBlob,
     thumbnail_blob: thumbnail,
     samples,
+    image_presented_at: imagePresentedAt,
+    heatmap_segment_seconds: heatmapSegmentSeconds,
+    aoi_regions: aoiRegions,
+    aoi_metrics: calculateAllAoiMetrics(),
     calibration_model: calibrationModel,
     recording_geometry: recordingGeometry,
+    heatmap_segments: storedHeatmapSegments(),
     version: 5,
   });
   await refreshLibraryBadge();
@@ -1470,6 +1518,9 @@ async function openLibraryCapture(id) {
   contentDurationMs = capture.content_duration_ms || capture.duration_ms;
   frontBlob = capture.front_blob || null;
   samples = capture.samples;
+  imagePresentedAt = capture.image_presented_at || "";
+  heatmapSegmentSeconds = capture.heatmap_segment_seconds || HEATMAP_SEGMENT_DEFAULT_SECONDS;
+  aoiRegions = capture.aoi_regions || [];
   calibrationModel = capture.calibration_model || null;
   currentCaptureId = capture.id;
   currentCaptureCreatedAt = capture.created_at;
@@ -1509,6 +1560,16 @@ async function prepareResults() {
   contentResultUrl = contentBlob ? URL.createObjectURL(contentBlob) : "";
   frontResultUrl = frontBlob ? URL.createObjectURL(frontBlob) : "";
   const isImage = contentKind === "image";
+  heatmapSegmentSeconds = heatmapSegmentSeconds === 5 ? 5 : HEATMAP_SEGMENT_DEFAULT_SECONDS;
+  activeHeatmapSegment = null;
+  els.segmentSeconds.value = String(heatmapSegmentSeconds);
+  els.analysisMode.value = "overall";
+  els.analysisMode.querySelector('option[value="segments"]').disabled = isImage;
+  els.analysisMode.querySelector('option[value="aoi"]').disabled = !isImage;
+  els.segmentSeconds.parentElement.classList.toggle("hidden", isImage);
+  els.segmentPanel.classList.add("hidden");
+  els.aoiPanel.classList.add("hidden");
+  els.aoiOverlay.classList.add("hidden");
   els.resultContentImage.classList.toggle("hidden", !isImage);
   els.resultContentVideo.classList.toggle("hidden", isImage || isYoutube);
   els.resultYoutubeWrap.classList.toggle("hidden", !isYoutube);
@@ -1624,7 +1685,9 @@ function drawHeatmap() {
   const mode = els.heatmapMode.value;
   if (mode === "off" || !samples.length) return;
   const t = resultSyncMs();
-  const visible = samples.filter((sample) => sample.gaze_valid_for_content !== 0 && sample.gaze_x !== "" && (mode === "overall" || Math.abs(sampleTime(sample) - t) <= HEATMAP_MOMENT_WINDOW_MS));
+  const visible = samples.filter((sample) => sample.gaze_valid_for_content !== 0 && sample.gaze_x !== "" && (activeHeatmapSegment
+    ? sampleTime(sample) >= activeHeatmapSegment.start_ms && sampleTime(sample) < activeHeatmapSegment.end_ms
+    : mode === "overall" || Math.abs(sampleTime(sample) - t) <= HEATMAP_MOMENT_WINDOW_MS));
   const media = contentKind === "image" ? els.resultContentImage : els.resultContentVideo;
   const rect = contentKind === "youtube"
     ? { x: 0, y: 0, width: canvas.width, height: canvas.height }
@@ -1644,6 +1707,93 @@ function drawHeatmap() {
   }
   ctx.globalCompositeOperation = "source-over";
 }
+
+function drawHeatmapOn(canvas, segmentRows, source) {
+  const ctx = canvas.getContext("2d");
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.max(1, Math.round(rect.width * dpr));
+  canvas.height = Math.max(1, Math.round(rect.height * dpr));
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const mediaRect = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+  ctx.globalCompositeOperation = "lighter";
+  for (const sample of segmentRows.filter((row) => row.gaze_valid_for_content !== 0 && row.gaze_x !== "")) {
+    const x = mediaRect.x + number(sample.gaze_x) * mediaRect.width;
+    const y = mediaRect.y + number(sample.gaze_y) * mediaRect.height;
+    const radius = Math.max(14, mediaRect.width * .09);
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    gradient.addColorStop(0, "rgba(255,40,20,.62)"); gradient.addColorStop(.38, "rgba(255,174,20,.36)"); gradient.addColorStop(1, "rgba(255,230,40,0)");
+    ctx.fillStyle = gradient; ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+  }
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function formatRange(segment) { return `${Math.round(segment.start_ms / 1000)}～${Math.round(segment.end_ms / 1000)}秒`; }
+
+async function renderSegmentHeatmaps() {
+  if (contentKind !== "video") return;
+  const segments = segmentSamples(samples, heatmapSegmentSeconds, contentDurationMs);
+  els.segmentGrid.replaceChildren();
+  els.segmentDetail.textContent = activeHeatmapSegment ? `${formatRange(activeHeatmapSegment)} を大きく表示中` : "コマを選ぶと、その時間帯だけのヒートマップを表示します";
+  const frameSource = document.createElement("video");
+  frameSource.src = contentResultUrl;
+  frameSource.muted = true; frameSource.playsInline = true;
+  await new Promise((resolve) => { frameSource.addEventListener("loadedmetadata", resolve, { once: true }); setTimeout(resolve, 1200); });
+  for (const segment of segments) {
+    const card = document.createElement("button"); card.type = "button"; card.className = "segment-card";
+    if (activeHeatmapSegment?.start_ms === segment.start_ms) card.classList.add("active");
+    const frame = document.createElement("div"); frame.className = "segment-frame";
+    const image = document.createElement("img"); image.alt = `${formatRange(segment)}の代表フレーム`;
+    const canvas = document.createElement("canvas"); frame.append(image, canvas);
+    const range = document.createElement("small"); range.textContent = formatRange(segment);
+    const count = document.createElement("strong"); count.textContent = `有効視線 ${segment.valid_gaze_samples}件`;
+    card.append(frame, range, count);
+    card.addEventListener("click", () => {
+      activeHeatmapSegment = segment;
+      els.heatmapMode.value = "overall";
+      els.resultContentVideo.currentTime = (segment.start_ms + segment.end_ms) / 2000;
+      drawHeatmap(); renderSegmentHeatmaps();
+    });
+    els.segmentGrid.append(card);
+    try {
+      frameSource.currentTime = Math.min((segment.start_ms + segment.end_ms) / 2000, Math.max(0, (frameSource.duration || 0) - .05));
+      await new Promise((resolve) => { frameSource.addEventListener("seeked", resolve, { once: true }); setTimeout(resolve, 800); });
+      const snapshot = document.createElement("canvas"); snapshot.width = frameSource.videoWidth || 320; snapshot.height = frameSource.videoHeight || 180;
+      snapshot.getContext("2d").drawImage(frameSource, 0, 0, snapshot.width, snapshot.height);
+      image.src = snapshot.toDataURL("image/jpeg", .72);
+    } catch { image.alt = `${formatRange(segment)}の代表フレームを作成できませんでした`; }
+    requestAnimationFrame(() => drawHeatmapOn(canvas, segment.samples, image));
+  }
+}
+
+function calculateAllAoiMetrics() { return aoiRegions.map((aoi) => calculateAoiMetrics(aoi, samples, { intervalMs: ANALYSIS_INTERVAL_MS, minDwellMs: AOI_MIN_DWELL_MS, missingGapMs: AOI_MISSING_GAP_MS })); }
+function storedHeatmapSegments() {
+  if (contentKind !== "video") return [];
+  return segmentSamples(samples, heatmapSegmentSeconds, contentDurationMs).map(({ start_ms, end_ms, valid_gaze_samples }) => ({ start_ms, end_ms, valid_gaze_samples }));
+}
+async function persistResultEdits() {
+  if (!currentCaptureId) return;
+  try { await libraryPut(currentCapture()); } catch (error) { console.warn("Result edit save skipped", error); }
+}
+
+function renderAoiAnalysis() {
+  els.aoiOverlay.replaceChildren();
+  els.aoiList.replaceChildren();
+  const metrics = calculateAllAoiMetrics();
+  const first = metrics.filter((item) => item.first_arrival_ms != null).sort((a, b) => a.first_arrival_ms - b.first_arrival_ms)[0];
+  els.aoiHelp.textContent = aoiRegions.length ? `最初に見られたAOI: ${aoiRegions.find((aoi) => aoi.id === first?.aoi_id)?.name || "—"}` : "画像上をドラッグして領域を追加します";
+  aoiRegions.forEach((aoi) => {
+    const box = document.createElement("div"); box.className = "aoi-box"; box.dataset.id = aoi.id;
+    box.style.left = `${aoi.x * 100}%`; box.style.top = `${aoi.y * 100}%`; box.style.width = `${aoi.width * 100}%`; box.style.height = `${aoi.height * 100}%`;
+    const label = document.createElement("span"); label.textContent = aoi.name; const resize = document.createElement("button"); resize.type = "button"; resize.className = "aoi-resize"; resize.setAttribute("aria-label", `${aoi.name}のサイズを変更`); box.append(label, resize); els.aoiOverlay.append(box);
+    const metric = metrics.find((item) => item.aoi_id === aoi.id);
+    const row = document.createElement("div"); row.className = "aoi-row";
+    const text = document.createElement("div"); text.innerHTML = `<strong>${escapeHtml(aoi.name)}</strong><small>推定初回到達時間: ${metric?.first_arrival_ms == null ? "—" : `${(metric.first_arrival_ms / 1000).toFixed(1)}秒`}<br>推定視線滞在時間: ${(metric?.dwell_ms || 0) / 1000}秒<br>推定視線進入回数: ${metric?.entries || 0}回<br>推定視線時間割合: ${Math.round((metric?.valid_time_ratio || 0) * 100)}%</small>`;
+    const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "削除"; remove.addEventListener("click", () => { aoiRegions = aoiRegions.filter((item) => item.id !== aoi.id); renderAoiAnalysis(); persistResultEdits(); }); row.append(text, remove); els.aoiList.append(row);
+  });
+}
+
+function escapeHtml(text) { const node = document.createElement("span"); node.textContent = text; return node.innerHTML; }
 
 function timelineDuration() {
   return Math.max(["video", "youtube"].includes(contentKind) ? contentDurationMs : (samples.at(-1)?.elapsed_ms || 1), 1);
@@ -1907,6 +2057,11 @@ function captureDataBlob(capture) {
     calibration: capture.calibration_model?.method || (capture.calibration_model ? "nine-point" : "uncalibrated"),
     calibration_model: capture.calibration_model || null,
     recording_geometry: capture.recording_geometry || null,
+    heatmap_segment_seconds: capture.heatmap_segment_seconds || HEATMAP_SEGMENT_DEFAULT_SECONDS,
+    image_presented_at: capture.image_presented_at || "",
+    aoi_regions: capture.aoi_regions || [],
+    aoi_metrics: capture.aoi_metrics || [],
+    heatmap_segments: capture.heatmap_segments || storedHeatmapSegments(),
     samples: capture.samples || [],
   }, null, 2)], { type: "application/json" });
 }
@@ -1985,6 +2140,11 @@ function currentCapture() {
     samples,
     calibration_model: calibrationModel,
     recording_geometry: recordingGeometry,
+    heatmap_segment_seconds: heatmapSegmentSeconds,
+    image_presented_at: imagePresentedAt,
+    aoi_regions: aoiRegions,
+    aoi_metrics: calculateAllAoiMetrics(),
+    heatmap_segments: storedHeatmapSegments(),
     version: 5,
   };
 }
@@ -2055,6 +2215,54 @@ els.resultContentVideo.addEventListener("timeupdate", () => { drawHeatmap(); dra
 els.resultContentVideo.addEventListener("loadedmetadata", () => { resizeHeatmap(); drawHeatmap(); drawTimeline(); });
 els.resultContentImage.addEventListener("load", () => { resizeHeatmap(); drawHeatmap(); });
 els.heatmapMode.addEventListener("change", drawHeatmap);
+els.analysisMode.addEventListener("change", async () => {
+  const mode = els.analysisMode.value;
+  activeHeatmapSegment = null;
+  els.segmentPanel.classList.toggle("hidden", mode !== "segments");
+  els.aoiPanel.classList.toggle("hidden", mode !== "aoi");
+  els.aoiOverlay.classList.toggle("hidden", mode !== "aoi");
+  if (mode === "segments") await renderSegmentHeatmaps();
+  if (mode === "aoi") renderAoiAnalysis();
+  drawHeatmap();
+});
+els.segmentSeconds.addEventListener("change", async () => {
+  heatmapSegmentSeconds = Number(els.segmentSeconds.value) === 5 ? 5 : 10;
+  activeHeatmapSegment = null;
+  if (els.analysisMode.value === "segments") await renderSegmentHeatmaps();
+});
+let aoiPointerState = null;
+els.aoiOverlay.addEventListener("pointerdown", (event) => {
+  if (contentKind !== "image") return;
+  const rect = els.aoiOverlay.getBoundingClientRect();
+  const x = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  const y = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+  const box = event.target.closest(".aoi-box");
+  const existing = aoiRegions.find((item) => item.id === box?.dataset.id);
+  aoiPointerState = existing ? { mode: event.target.closest(".aoi-resize") ? "resize" : "move", aoi: existing, startX: x, startY: y, origin: { ...existing } } : { mode: "create", startX: x, startY: y };
+  els.aoiOverlay.setPointerCapture(event.pointerId); event.preventDefault();
+});
+els.aoiOverlay.addEventListener("pointermove", (event) => {
+  if (!aoiPointerState) return;
+  const rect = els.aoiOverlay.getBoundingClientRect(); const x = clamp((event.clientX - rect.left) / rect.width, 0, 1); const y = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+  const state = aoiPointerState;
+  if (state.mode === "create") state.preview = { x: Math.min(state.startX, x), y: Math.min(state.startY, y), width: Math.abs(x - state.startX), height: Math.abs(y - state.startY) };
+  else if (state.mode === "move") { state.aoi.x = clamp(state.origin.x + x - state.startX, 0, 1 - state.origin.width); state.aoi.y = clamp(state.origin.y + y - state.startY, 0, 1 - state.origin.height); }
+  else { state.aoi.width = clamp(state.origin.width + x - state.startX, .02, 1 - state.origin.x); state.aoi.height = clamp(state.origin.height + y - state.startY, .02, 1 - state.origin.y); }
+  renderAoiAnalysis();
+  if (state.mode === "create" && state.preview) {
+    const preview = document.createElement("div"); preview.className = "aoi-box"; preview.style.left = `${state.preview.x * 100}%`; preview.style.top = `${state.preview.y * 100}%`; preview.style.width = `${state.preview.width * 100}%`; preview.style.height = `${state.preview.height * 100}%`; els.aoiOverlay.append(preview);
+  }
+});
+els.aoiOverlay.addEventListener("pointerup", (event) => {
+  const state = aoiPointerState; aoiPointerState = null;
+  if (!state) return;
+  if (state.mode === "create" && state.preview?.width >= .02 && state.preview?.height >= .02) {
+    const name = prompt("領域名を入力してください", `要素${aoiRegions.length + 1}`)?.trim();
+    if (name) aoiRegions.push({ id: crypto.randomUUID?.() || `aoi-${Date.now()}`, name, ...state.preview });
+  }
+  renderAoiAnalysis(); event.preventDefault();
+  persistResultEdits();
+});
 els.timelineCanvas.addEventListener("click", seekFromTimeline);
 els.playReactionButton.addEventListener("click", playReaction);
 els.pauseReactionButton.addEventListener("click", pauseOrStopReaction);
