@@ -27,6 +27,22 @@ export function signedPerpendicularFeature(point, edgeA, edgeB) {
   return (dx * (point.y - start.y) - dy * (point.x - start.x)) / widthSquared;
 }
 
+export function resolveMappedGaze(mapped, margin = 0.35) {
+  if (!mapped || !Number.isFinite(mapped.x) || !Number.isFinite(mapped.y)) return null;
+  // Gaze beyond the outermost calibration point extrapolates past the media edge.
+  // Keep it as an edge observation, and drop only clearly impossible values.
+  const overflow = Math.max(-mapped.x, mapped.x - 1, -mapped.y, mapped.y - 1, 0);
+  if (overflow > margin) return null;
+  const clamp01 = (value) => Math.min(1, Math.max(0, value));
+  return {
+    x: clamp01(mapped.x),
+    y: clamp01(mapped.y),
+    overflow,
+    atEdge: overflow > 0,
+    weight: overflow > 0 ? Math.max(0.5, 1 - overflow) : 1,
+  };
+}
+
 export function evaluatePoseQuality(metrics, pose) {
   if (!pose || !metrics?.faceDetected) {
     return { level: metrics?.faceDetected ? "good" : "unavailable", weight: metrics?.faceDetected ? 1 : 0, severity: 0, direction: "" };
