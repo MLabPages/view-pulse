@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -41,6 +41,7 @@ const requiredAppMarkers = [
   "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "gaze_missing_reason", "model_output_stale", "renderRecordingFaceGuide", "左上の枠と点を合わせてください",
   'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "順序が一貫しなかったため記録を開始できません", "mapped_out_of_bounds",
   "3段階の順序と確認点の精度基準を満たしたため記録できます", "vertical_error", "verticalOrderConsistent",
+  "resolveMappedGaze", "gaze_at_edge", "gaze_edge_overflow",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -94,6 +95,15 @@ if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値�
 if (normalizedFeature(0.75, 1, 0.5) !== 0.5 || normalizedFeature(0.75, 0.5, 1) !== 0.5) throw new Error("左右の目を同じ座標方向へ正規化できません");
 const perpendicular = signedPerpendicularFeature({ x: 0.5, y: 0.1 }, { x: 0, y: 0 }, { x: 1, y: 0 });
 if (Math.abs(perpendicular - 0.1) > 1e-9) throw new Error("眼軸に対する虹彩の局所縦座標計算に失敗");
+const edgeGaze = resolveMappedGaze({ x: 1.21, y: 1.18 });
+if (!edgeGaze || edgeGaze.x !== 1 || edgeGaze.y !== 1 || !edgeGaze.atEdge || edgeGaze.weight >= 1) {
+  throw new Error("画面端へわずかにはみ出した視線を端の観測として残せません");
+}
+const insideGaze = resolveMappedGaze({ x: 0.62, y: 0.31 });
+if (!insideGaze || insideGaze.atEdge || insideGaze.weight !== 1) throw new Error("画面内の視線を通常の観測として扱えません");
+if (resolveMappedGaze({ x: 1.9, y: 0.5 }) || resolveMappedGaze({ x: 0.5, y: -0.8 })) {
+  throw new Error("明らかに画面外の視線を除外できません");
+}
 const separatedAxes = measureAxisSeparation([0.15, 0.5, 0.85].flatMap((targetY) =>
   [0.15, 0.5, 0.85].flatMap((targetX) => [-0.002, 0, 0.002].map((noise, repeat) => ({
     targetX, targetY, repeat, screenX: targetX * 0.1 + noise, screenY: targetY * 0.1 + noise,

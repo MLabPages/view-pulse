@@ -1,5 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -645,9 +645,13 @@ function mapGaze(metrics = null, { skipPoseCheck = false } = {}) {
   if (performance.now() - specializedGaze.receivedAt > SPECIALIZED_GAZE_MAX_AGE_MS) return null;
   const poseQuality = !skipPoseCheck && metrics ? evaluatePoseQuality(metrics, calibrationModel.pose) : { level: "good", weight: 1, severity: 0 };
   if (poseQuality.level === "excluded") return null;
-  const mapped = mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY);
-  if (!mapped || mapped.x < 0 || mapped.x > 1 || mapped.y < 0 || mapped.y > 1) return null;
-  return { ...mapped, calibrated: true, poseQuality };
+  const resolved = resolveMappedGaze(mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY));
+  if (!resolved) return null;
+  return {
+    x: resolved.x, y: resolved.y, calibrated: true, poseQuality,
+    atEdge: resolved.atEdge, overflow: resolved.overflow,
+    weight: poseQuality.weight * resolved.weight,
+  };
 }
 
 function isCalibrationPoseStable(metrics) {
@@ -678,8 +682,8 @@ function sampleMetrics(now, metrics) {
   const poseQuality = metrics?.faceDetected && calibrationModel?.pose
     ? evaluatePoseQuality(metrics, calibrationModel.pose)
     : { level: "unavailable", weight: 0, severity: 0 };
-  const rawMapped = specializedGaze ? mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY) : null;
-  const mappedOutOfBounds = rawMapped && (rawMapped.x < 0 || rawMapped.x > 1 || rawMapped.y < 0 || rawMapped.y > 1);
+  const mappedOutOfBounds = Boolean(specializedGaze)
+    && !resolveMappedGaze(mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY));
   const gazeMissingReason = gaze ? ""
     : !metrics?.faceDetected ? "face_not_detected"
       : poseQuality.level === "excluded" ? "pose_excluded"
@@ -696,7 +700,9 @@ function sampleMetrics(now, metrics) {
     gaze_excluded_motion: gazeMissingReason === "pose_excluded" ? 1 : 0,
     gaze_missing_reason: gazeMissingReason,
     gaze_pose_quality: gaze?.poseQuality?.level || poseQuality.level,
-    gaze_weight: round(gaze?.poseQuality?.weight ?? 0),
+    gaze_weight: round(gaze?.weight ?? 0),
+    gaze_at_edge: gaze?.atEdge ? 1 : 0,
+    gaze_edge_overflow: round(gaze?.overflow ?? 0),
     gaze_pose_deviation: round(poseQuality.severity),
     raw_gaze_x: round(specializedGaze?.screenX), raw_gaze_y: round(specializedGaze?.screenY),
     gaze_engine: gazeEngine,
