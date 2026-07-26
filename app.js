@@ -6,7 +6,9 @@ const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmar
 const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
-const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 60000;
+const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
+const SPECIALIZED_GAZE_WORKER_URL = new URL("./vendor/webeyetrack/webeyetrack.worker.js", import.meta.url);
+const SPECIALIZED_GAZE_MODEL_URL = new URL("./web/model.json", import.meta.url);
 const LIBRARY_DB_NAME = "viewpulse-library";
 const LIBRARY_DB_VERSION = 1;
 const LIBRARY_STORE = "captures";
@@ -348,6 +350,7 @@ async function mountSelectedContent() {
 }
 
 function cameraErrorMessage(error) {
+  if (error?.gazeModel) return error.message;
   if (error?.name === "NotAllowedError") return "内カメが許可されていません。ブラウザのサイト設定でカメラを許可してください。";
   if (error?.name === "NotFoundError") return "利用できる内カメが見つかりません。";
   if (error?.name === "NotReadableError") return "別のアプリがカメラを使用中の可能性があります。";
@@ -370,7 +373,13 @@ function loadSpecializedGazeModel() {
   stopSpecializedGazeModel();
   els.analysisBadge.querySelector("span").textContent = "専用視線モデルを読込中";
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./vendor/webeyetrack/webeyetrack.worker.js", import.meta.url));
+    let worker;
+    try {
+      worker = new Worker(SPECIALIZED_GAZE_WORKER_URL);
+    } catch (error) {
+      reject(gazeModelError("専用視線モデルを開始できませんでした（このブラウザはWorkerに未対応の可能性があります）"));
+      return;
+    }
     webEyeWorker = worker;
     let settled = false;
     const finish = (callback, value) => {
@@ -380,13 +389,19 @@ function loadSpecializedGazeModel() {
       callback(value);
     };
     const timeout = window.setTimeout(() => {
-      finish(reject, new Error("専用視線モデルの読み込みがタイムアウトしました"));
+      finish(reject, gazeModelError("専用視線モデルの読み込みが時間内に終わりませんでした。通信状況を確認して、もう一度お試しください"));
     }, SPECIALIZED_GAZE_INIT_TIMEOUT_MS);
     worker.onmessage = (event) => {
       const message = event.data || {};
       if (message.type === "ready") {
         webEyeReady = true;
         finish(resolve);
+      } else if (message.type === "initError") {
+        webEyeReady = false;
+        finish(reject, gazeModelError(`専用視線モデルを読み込めませんでした（${message.message || "原因不明"}）`));
+      } else if (message.type === "stepError") {
+        webEyeBusy = false;
+        console.warn("Specialized gaze step failed", message.message);
       } else if (message.type === "stepResult") {
         webEyeBusy = false;
         updateSpecializedGaze(message.result);
@@ -397,10 +412,19 @@ function loadSpecializedGazeModel() {
     worker.onerror = (event) => {
       webEyeBusy = false;
       webEyeReady = false;
-      finish(reject, new Error(event.message || "専用視線モデルを開始できませんでした"));
+      finish(reject, gazeModelError(event.message || "専用視線モデルを開始できませんでした"));
     };
-    worker.postMessage({ type: "init" });
+    worker.postMessage({
+      type: "init",
+      payload: { modelUrl: SPECIALIZED_GAZE_MODEL_URL.href, maxPoints: CALIBRATION_POINTS.length },
+    });
   });
+}
+
+function gazeModelError(message) {
+  const error = new Error(message);
+  error.gazeModel = true;
+  return error;
 }
 
 function stopSpecializedGazeModel() {
