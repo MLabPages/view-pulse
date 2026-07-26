@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
+import { applyDirectGazeMapping, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -33,8 +34,8 @@ const requiredAppMarkers = [
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
   "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
-  "CALIBRATION_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
-  "randomized-nine-point-direct-mapping", "fitDirectGazeMapping", "gaze_quality",
+  "CALIBRATION_BASE_REPEATS = 2", "CALIBRATION_MAX_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
+  "adaptive-randomized-nine-point-direct-mapping", "selectDirectGazeMapping", "findUnstableCalibrationTargets", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
@@ -84,8 +85,24 @@ if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopol
   throw new Error("専用視線モデルまたはライセンスが不足");
 }
 
+if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値計算に失敗");
+const syntheticTargets = [0.15, 0.5, 0.85].flatMap((targetY) => [0.15, 0.5, 0.85].map((targetX) => ({
+  targetX,
+  targetY,
+  screenX: 0.22 + 0.48 * targetX + 0.07 * targetY,
+  screenY: 0.18 - 0.04 * targetX + 0.52 * targetY,
+})));
+const syntheticMapping = selectDirectGazeMapping(syntheticTargets);
+if (!syntheticMapping || syntheticMapping.mode !== "affine2d") throw new Error("安定した一次視線変換の選択に失敗");
+const syntheticErrors = syntheticTargets.map((point) => {
+  const predicted = applyDirectGazeMapping(point.screenX, point.screenY, syntheticMapping);
+  return Math.hypot(predicted.x - point.targetX, predicted.y - point.targetY);
+});
+if (Math.max(...syntheticErrors) > 0.015) throw new Error("視線座標変換の数値精度が不足");
+
 console.log(`OK: ${htmlIds.length}個のUI要素を検証`);
 console.log("OK: 画像・動画選択、内カメ1台解析、同期、表示モード切替、同意保存、結果表示を確認");
 console.log("OK: 旧rear_blob互換、IndexedDBライブラリ、共有・削除、外部送信なしの説明を確認");
 console.log("OK: YouTube URL解析・公式プレイヤー同期・PWA共有先・Netflix除外を確認");
 console.log("OK: WebEyeTrack Worker、視線モデル重み、MITライセンスを確認");
+console.log("OK: 適応型キャリブレーションの中央値・モデル選択・座標変換を数値検証");

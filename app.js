@@ -1,4 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
+import { applyDirectGazeMapping, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -7,7 +8,9 @@ const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
-const CALIBRATION_REPEATS = 3;
+const CALIBRATION_BASE_REPEATS = 2;
+const CALIBRATION_MAX_REPEATS = 3;
+const CALIBRATION_REPEAT_DIFFERENCE_LIMIT = 0.045;
 const CALIBRATION_MIN_SAMPLES = 3;
 const CALIBRATION_MAX_SAMPLES = 5;
 const CALIBRATION_SETTLE_MS = 450;
@@ -579,81 +582,13 @@ function projectScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeo
 
 function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry(), options = {}) {
   const directMapping = "directMapping" in options ? options.directMapping : calibrationModel?.direct_mapping;
-  if (directMapping?.mode === "quadratic2d") {
+  if (["affine2d", "quadratic2d"].includes(directMapping?.mode)) {
     const mapped = applyDirectGazeMapping(screenX, screenY, directMapping);
     return mapped ? { x: clamp(mapped.x, 0, 1), y: clamp(mapped.y, 0, 1) } : null;
   }
   const raw = projectScreenGazeToMedia(screenX, screenY, geometry);
   if (!raw) return null;
   return { x: clamp(raw.x, 0, 1), y: clamp(raw.y, 0, 1) };
-}
-
-function directMappingFeatures(screenX, screenY, mapping) {
-  const x = (screenX - mapping.center.x) / mapping.scale.x;
-  const y = (screenY - mapping.center.y) / mapping.scale.y;
-  return [1, x, y, x * x, x * y, y * y];
-}
-
-function applyDirectGazeMapping(screenX, screenY, mapping) {
-  if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return null;
-  const features = directMappingFeatures(screenX, screenY, mapping);
-  const x = features.reduce((sum, value, index) => sum + value * mapping.x_coefficients[index], 0);
-  const y = features.reduce((sum, value, index) => sum + value * mapping.y_coefficients[index], 0);
-  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
-}
-
-function fitDirectGazeMapping(points) {
-  if (points.length < CALIBRATION_POINTS.length) return null;
-  const centerX = median(points.map((point) => point.screenX));
-  const centerY = median(points.map((point) => point.screenY));
-  const rangeX = Math.max(...points.map((point) => point.screenX)) - Math.min(...points.map((point) => point.screenX));
-  const rangeY = Math.max(...points.map((point) => point.screenY)) - Math.min(...points.map((point) => point.screenY));
-  const mapping = {
-    mode: "quadratic2d",
-    center: { x: centerX, y: centerY },
-    scale: { x: Math.max(rangeX / 2, 0.03), y: Math.max(rangeY / 2, 0.03) },
-  };
-  const size = 6;
-  const normal = Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? (row < 3 ? 0.01 : 0.04) : 0));
-  const targetX = Array(size).fill(0);
-  const targetY = Array(size).fill(0);
-  for (const point of points) {
-    const row = directMappingFeatures(point.screenX, point.screenY, mapping);
-    for (let i = 0; i < size; i++) {
-      targetX[i] += row[i] * point.targetX;
-      targetY[i] += row[i] * point.targetY;
-      for (let j = 0; j < size; j++) normal[i][j] += row[i] * row[j];
-    }
-  }
-  const xCoefficients = solveLinearSystem(normal, targetX);
-  const yCoefficients = solveLinearSystem(normal, targetY);
-  if (!xCoefficients || !yCoefficients || ![...xCoefficients, ...yCoefficients].every(Number.isFinite)) return null;
-  return {
-    ...mapping,
-    x_coefficients: xCoefficients,
-    y_coefficients: yCoefficients,
-  };
-}
-
-function solveLinearSystem(matrix, vector) {
-  const rows = matrix.map((row, index) => [...row, vector[index]]);
-  const size = matrix.length;
-  for (let column = 0; column < size; column++) {
-    let pivot = column;
-    for (let row = column + 1; row < size; row++) {
-      if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
-    }
-    if (Math.abs(rows[pivot][column]) < 1e-7) return null;
-    [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
-    const divisor = rows[column][column];
-    for (let index = column; index <= size; index++) rows[column][index] /= divisor;
-    for (let row = 0; row < size; row++) {
-      if (row === column) continue;
-      const factor = rows[row][column];
-      for (let index = column; index <= size; index++) rows[row][index] -= factor * rows[column][index];
-    }
-  }
-  return rows.map((row) => row[size]);
 }
 
 function mapGaze(metrics = null, { skipPoseCheck = false } = {}) {
@@ -720,21 +655,36 @@ async function runCalibration() {
   try {
     webEyeEyesClosed = 0;
     const automatic = usesAutomaticCalibration();
-    const sequence = buildCalibrationSequence();
+    const sequence = buildCalibrationSequence(CALIBRATION_BASE_REPEATS);
     for (let i = 0; i < sequence.length; i++) {
       const item = sequence[i];
       observations.push(await collectCalibrationTrial(item, i, sequence.length, geometry, automatic));
     }
+    const additionalTargets = shuffleCalibrationPoints(findUnstableCalibrationTargets(observations));
+    for (let i = 0; i < additionalTargets.length; i++) {
+      observations.push(await collectCalibrationTrial(
+        { ...additionalTargets[i], repeat: CALIBRATION_MAX_REPEATS },
+        i,
+        additionalTargets.length,
+        geometry,
+        automatic,
+        "ばらつきの大きい点を追加確認しています",
+      ));
+    }
     const representatives = summarizeCalibrationPoints(observations);
-    const directMapping = fitDirectGazeMapping(representatives);
+    const directMapping = selectDirectGazeMapping(representatives);
     if (!directMapping) throw new Error("9点の視線座標から変換を作成できませんでした");
     calibrationModel = {
       engine: "webeyetrack",
       engine_version: "0.0.2",
       backend: webEyeBackend,
-      method: "randomized-nine-point-direct-mapping",
+      method: "adaptive-randomized-nine-point-direct-mapping",
       calibration_points: CALIBRATION_POINTS.length,
-      calibration_repeats: CALIBRATION_REPEATS,
+      calibration_repeats: {
+        base: CALIBRATION_BASE_REPEATS,
+        maximum: CALIBRATION_MAX_REPEATS,
+        additional_points: additionalTargets.map((point) => ({ x: point.x, y: point.y })),
+      },
       calibration_trials: observations.length,
       samples_per_trial: { minimum: CALIBRATION_MIN_SAMPLES, maximum: CALIBRATION_MAX_SAMPLES },
       confirmation: automatic ? "automatic" : "click",
@@ -819,9 +769,9 @@ function shuffleCalibrationPoints(points) {
   return shuffled;
 }
 
-function buildCalibrationSequence() {
+function buildCalibrationSequence(repeats = CALIBRATION_BASE_REPEATS) {
   const sequence = [];
-  for (let repeat = 0; repeat < CALIBRATION_REPEATS; repeat++) {
+  for (let repeat = 0; repeat < repeats; repeat++) {
     const batch = shuffleCalibrationPoints(CALIBRATION_POINTS);
     if (sequence.length && batch[0].x === sequence.at(-1).x && batch[0].y === sequence.at(-1).y) {
       [batch[0], batch[1]] = [batch[1], batch[0]];
@@ -829,6 +779,18 @@ function buildCalibrationSequence() {
     batch.forEach((point) => sequence.push({ ...point, repeat: repeat + 1 }));
   }
   return sequence;
+}
+
+function findUnstableCalibrationTargets(observations) {
+  return CALIBRATION_POINTS.filter((target) => {
+    const trials = observations.filter((point) => point.targetX === target.x && point.targetY === target.y);
+    if (trials.length < CALIBRATION_BASE_REPEATS) return true;
+    const first = trials[0];
+    const second = trials[1];
+    const repeatDifference = Math.hypot(first.screenX - second.screenX, first.screenY - second.screenY);
+    const withinTrialSpread = Math.max(...trials.map((trial) => trial.spread || 0));
+    return repeatDifference > CALIBRATION_REPEAT_DIFFERENCE_LIMIT || withinTrialSpread > CALIBRATION_REPEAT_DIFFERENCE_LIMIT;
+  });
 }
 
 async function collectCalibrationTrial(point, index, total, geometry, automatic, instruction = "") {
@@ -909,7 +871,7 @@ function waitForCalibrationTargetClick(timeoutMs) {
 function summarizeCalibrationPoints(observations) {
   return CALIBRATION_POINTS.map((target) => {
     const trials = observations.filter((point) => point.targetX === target.x && point.targetY === target.y);
-    if (trials.length < CALIBRATION_REPEATS) throw new Error("同じ注視点を3回確認できませんでした");
+    if (trials.length < CALIBRATION_BASE_REPEATS) throw new Error("同じ注視点を2回確認できませんでした");
     return {
       screenX: median(trials.map((point) => point.screenX)),
       screenY: median(trials.map((point) => point.screenY)),
@@ -1842,7 +1804,6 @@ function round(value) { return value == null || !Number.isFinite(value) ? "" : M
 function number(value) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-function median(values) { const sorted = [...values].sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; }
 function gazeZone(x, y) {
   const col = x < 0.333 ? "left" : x > 0.666 ? "right" : "center";
   const row = y < 0.333 ? "up" : y > 0.666 ? "down" : "middle";
