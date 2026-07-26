@@ -42,6 +42,7 @@ const requiredHtmlMarkers = [
   'accept="image/*,video/*"', "小窓", "非表示", "表情映像も端末内に保存する",
   "iPhone・iPadを含む", "視線ヒートマップ", "反応の波", "端末内ライブラリ",
   "YouTube URL", "YouTube選択時は動画再生のためYouTubeへ接続します", "youtubeReactionNote",
+  "背景の動画は調整中だけ隠れています",
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);
@@ -50,6 +51,7 @@ if (app.includes('facingMode: { exact: "environment" }') || html.includes("前�
   throw new Error("旧方式の外カメ／前後同時利用条件が残っています");
 }
 if (!css.includes("@media (max-width: 650px)")) throw new Error("スマホ向けレイアウトが不足");
+if (!css.includes(".calibration-layer") || !css.includes("background: #000")) throw new Error("黒背景の視線調整画面が不足");
 if (!css.includes("word-break: keep-all")) throw new Error("見出しの自然な改行設定が不足");
 if (!css.includes(".library-back-button") || !css.includes(".library-open-target") || !css.includes('content: "分析を見る"')) {
   throw new Error("ライブラリの戻る操作または分析を開く導線が不足");
