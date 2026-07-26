@@ -38,7 +38,7 @@ const requiredAppMarkers = [
   "randomized-three-pass-nine-point-direct-mapping", "selectDirectGazeMapping", "calibrationRequiredSamples", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
   "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
-  "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "renderRecordingFaceGuide",
+  "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "gaze_missing_reason", "model_output_stale", "renderRecordingFaceGuide",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
