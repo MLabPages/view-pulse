@@ -612,6 +612,13 @@ function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometr
 
 function applyGazeCorrection(point, correction) {
   if (!correction) return point;
+  if (correction.mode === "affine2d" && Array.isArray(correction.matrix) && correction.matrix.length === 6) {
+    const [xx, xy, xOffset, yx, yy, yOffset] = correction.matrix;
+    return {
+      x: xx * point.x + xy * point.y + xOffset,
+      y: yx * point.x + yy * point.y + yOffset,
+    };
+  }
   return {
     x: correction.x.scale * point.x + correction.x.offset,
     y: correction.y.scale * point.y + correction.y.offset,
@@ -619,11 +626,72 @@ function applyGazeCorrection(point, correction) {
 }
 
 function fitGazeCorrection(samples) {
+  // Residual errors after the gaze-model fit can be diagonal: for example,
+  // looking right may also shift the predicted point down. Independent X/Y
+  // scaling cannot correct that, while a 2D affine transform can.
+  const affine = fitAffineCorrection(samples);
+  if (affine) {
+    return {
+      mode: "affine2d",
+      matrix: affine,
+      points: samples.map((s) => ({ x: round(s.x), y: round(s.y), target_x: s.targetX, target_y: s.targetY })),
+    };
+  }
   return {
+    mode: "axis",
     x: fitCorrectionAxis(samples.map((s) => s.x), samples.map((s) => s.targetX)),
     y: fitCorrectionAxis(samples.map((s) => s.y), samples.map((s) => s.targetY)),
     points: samples.map((s) => ({ x: round(s.x), y: round(s.y), target_x: s.targetX, target_y: s.targetY })),
   };
+}
+
+function fitAffineCorrection(samples) {
+  if (samples.length < 3) return null;
+  // Ridge regression keeps five noisy correction points from producing an
+  // implausibly large transform, while favouring the identity correction.
+  const ridge = 0.025;
+  const normal = [[ridge, 0, 0], [0, ridge, 0], [0, 0, ridge]];
+  const targetX = [ridge, 0, 0];
+  const targetY = [0, ridge, 0];
+  for (const sample of samples) {
+    const row = [sample.x, sample.y, 1];
+    for (let i = 0; i < 3; i++) {
+      targetX[i] += row[i] * sample.targetX;
+      targetY[i] += row[i] * sample.targetY;
+      for (let j = 0; j < 3; j++) normal[i][j] += row[i] * row[j];
+    }
+  }
+  const x = solveLinearSystem(normal, targetX);
+  const y = solveLinearSystem(normal, targetY);
+  if (!x || !y) return null;
+  const matrix = [...x, ...y];
+  const xScale = Math.hypot(matrix[0], matrix[1]);
+  const yScale = Math.hypot(matrix[3], matrix[4]);
+  // A singular/noisy fit would make the heatmap look certain while being
+  // wildly wrong. Keep the existing axis-only fallback in that case.
+  if (!matrix.every(Number.isFinite) || xScale < 0.2 || xScale > 5 || yScale < 0.2 || yScale > 5
+    || Math.abs(matrix[2]) > 1.5 || Math.abs(matrix[5]) > 1.5) return null;
+  return matrix.map((value) => round(value));
+}
+
+function solveLinearSystem(matrix, vector) {
+  const rows = matrix.map((row, index) => [...row, vector[index]]);
+  for (let column = 0; column < 3; column++) {
+    let pivot = column;
+    for (let row = column + 1; row < 3; row++) {
+      if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
+    }
+    if (Math.abs(rows[pivot][column]) < 1e-7) return null;
+    [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
+    const divisor = rows[column][column];
+    for (let index = column; index < 4; index++) rows[column][index] /= divisor;
+    for (let row = 0; row < 3; row++) {
+      if (row === column) continue;
+      const factor = rows[row][column];
+      for (let index = column; index < 4; index++) rows[row][index] -= factor * rows[column][index];
+    }
+  }
+  return rows.map((row) => row[3]);
 }
 
 function fitCorrectionAxis(values, targets) {
@@ -763,7 +831,7 @@ async function runCalibration() {
         mean_diagonal_ratio: round(meanDiagonalRatio), max_diagonal_ratio: round(maxDiagonalRatio),
       };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
-      if (!accepted) qualityMessage += "。精度基準を満たさないため、記録は開始できません。端末を固定して再調整してください";
+      if (!accepted) qualityMessage += "。精度基準を満たさないため、記録は開始できません。端末の固定だけでは改善しないため、再調整しても改善しない場合は、この環境ではWeb版の視線座標を研究用精度で取得できません。";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
       calibrationModel.validation = { status: "unavailable", accepted: false, reason: validationError.message || "unknown" };
@@ -777,7 +845,7 @@ async function runCalibration() {
     console.warn(error);
     calibrationModel = null;
     els.recordButton.disabled = true;
-    els.captureHint.textContent = `視線調整を完了できませんでした（${error.message || "視線を検出できませんでした"}）。端末を固定して再度お試しください`;
+    els.captureHint.textContent = `視線調整を完了できませんでした（${error.message || "視線を検出できませんでした"}）。照明・眼鏡・顔の向きでも検出が不安定になることがあります。`;
   } finally {
     calibrationCollect = null;
     els.calibrationLayer.classList.add("hidden");

@@ -33,7 +33,7 @@ const requiredAppMarkers = [
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
   "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
-  "steps: 0", "CALIBRATION_FIT_TIMEOUT_MS = 60000", "CALIBRATION_MIN_SAMPLES = 1",
+  "steps: 0", "CALIBRATION_FIT_TIMEOUT_MS = 60000", "CALIBRATION_MIN_SAMPLES = 1", "affine2d", "fitAffineCorrection",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
