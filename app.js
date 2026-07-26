@@ -1,5 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -50,6 +50,7 @@ const els = {
   captureHint: $("captureHint"), calibrationLayer: $("calibrationLayer"), calibrationTarget: $("calibrationTarget"), calibrationInstruction: $("calibrationInstruction"),
   calibrationProgress: $("calibrationProgress"), faceAlignmentGuide: $("faceAlignmentGuide"),
   faceGuideDot: $("faceGuideDot"), faceGuideStatus: $("faceGuideStatus"), calibrateButton: $("calibrateButton"),
+  recordingFaceGuide: $("recordingFaceGuide"), recordingFaceDot: $("recordingFaceDot"), recordingFaceStatus: $("recordingFaceStatus"),
   recordingBadge: $("recordingBadge"), recordingTime: $("recordingTime"), analysisBadge: $("analysisBadge"),
   recordButton: $("recordButton"), fullscreenButton: $("fullscreenButton"),
   pipModeButton: $("pipModeButton"), hiddenModeButton: $("hiddenModeButton"),
@@ -567,10 +568,24 @@ function computeFaceMetrics(result) {
 
 function updateAnalysisBadge(metrics) {
   const span = els.analysisBadge.querySelector("span");
+  renderRecordingFaceGuide(metrics);
   if (!metrics?.faceDetected) span.textContent = "顔を画面側へ向けてください";
   else if (!webEyeReady) span.textContent = "専用視線モデルを読込中";
-  else if (calibrationModel && !isCalibrationPoseStable(metrics)) span.textContent = "顔を調整時の位置へ戻してください";
+  else if (calibrationModel && evaluatePoseQuality(metrics, calibrationModel.pose).level === "excluded") span.textContent = "顔位置が大きく変わり視線を一時保留中";
   else span.textContent = specializedGaze ? "専用モデルで視線・表情を端末内解析" : "目を確認中";
+}
+
+function renderRecordingFaceGuide(metrics) {
+  const pose = calibrationModel?.pose;
+  els.recordingFaceGuide.classList.toggle("hidden", !pose || !metrics?.faceDetected || !els.calibrationLayer.classList.contains("hidden"));
+  if (!pose || !metrics?.faceDetected) return;
+  const quality = evaluatePoseQuality(metrics, pose);
+  const x = clamp(50 + (pose.faceCenterX - metrics.faceCenterX) * 260, 15, 85);
+  const y = clamp(50 + (metrics.faceCenterY - pose.faceCenterY) * 260, 15, 85);
+  els.recordingFaceDot.style.left = `${x}%`;
+  els.recordingFaceDot.style.top = `${y}%`;
+  els.recordingFaceGuide.dataset.quality = quality.level;
+  els.recordingFaceStatus.textContent = quality.level === "good" ? "顔位置 OK" : quality.direction;
 }
 
 function projectScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry()) {
@@ -598,9 +613,10 @@ function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometr
 function mapGaze(metrics = null, { skipPoseCheck = false } = {}) {
   if (!calibrationModel || calibrationModel.engine !== "webeyetrack" || !specializedGaze) return null;
   if (performance.now() - specializedGaze.receivedAt > SPECIALIZED_GAZE_MAX_AGE_MS) return null;
-  if (!skipPoseCheck && metrics && !isCalibrationPoseStable(metrics)) return null;
+  const poseQuality = !skipPoseCheck && metrics ? evaluatePoseQuality(metrics, calibrationModel.pose) : { level: "good", weight: 1, severity: 0 };
+  if (poseQuality.level === "excluded") return null;
   const mapped = mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY);
-  return mapped ? { ...mapped, calibrated: true } : null;
+  return mapped ? { ...mapped, calibrated: true, poseQuality } : null;
 }
 
 function isCalibrationPoseStable(metrics) {
@@ -628,6 +644,9 @@ function currentSyncMs(now = performance.now()) {
 
 function sampleMetrics(now, metrics) {
   const gaze = metrics?.faceDetected ? mapGaze(metrics) : null;
+  const poseQuality = metrics?.faceDetected && calibrationModel?.pose
+    ? evaluatePoseQuality(metrics, calibrationModel.pose)
+    : { level: "unavailable", weight: 0, severity: 0 };
   samples.push({
     elapsed_ms: Math.max(0, Math.round(now - recordStart)),
     sync_ms: currentSyncMs(now),
@@ -635,6 +654,9 @@ function sampleMetrics(now, metrics) {
     face_detected: metrics?.faceDetected ? 1 : 0,
     gaze_x: round(gaze?.x), gaze_y: round(gaze?.y), gaze_calibrated: gaze?.calibrated ? 1 : 0,
     gaze_excluded_motion: metrics?.faceDetected && specializedGaze && !gaze ? 1 : 0,
+    gaze_pose_quality: gaze?.poseQuality?.level || poseQuality.level,
+    gaze_weight: round(gaze?.poseQuality?.weight ?? 0),
+    gaze_pose_deviation: round(poseQuality.severity),
     raw_gaze_x: round(specializedGaze?.screenX), raw_gaze_y: round(specializedGaze?.screenY),
     gaze_engine: "webeyetrack",
     gaze_quality: calibrationModel?.validation?.status || "unavailable",
@@ -1507,8 +1529,9 @@ function drawHeatmap() {
     const y = rect.y + number(sample.gaze_y) * rect.height;
     const radius = Math.max(24, rect.width * (mode === "overall" ? 0.055 : 0.045));
     const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-    gradient.addColorStop(0, mode === "overall" ? "rgba(255,40,20,.16)" : "rgba(255,40,20,.64)");
-    gradient.addColorStop(0.34, mode === "overall" ? "rgba(255,174,20,.10)" : "rgba(255,174,20,.42)");
+    const weight = Number.isFinite(Number(sample.gaze_weight)) ? clamp(Number(sample.gaze_weight), 0.35, 1) : 1;
+    gradient.addColorStop(0, `rgba(255,40,20,${(mode === "overall" ? 0.16 : 0.64) * weight})`);
+    gradient.addColorStop(0.34, `rgba(255,174,20,${(mode === "overall" ? 0.10 : 0.42) * weight})`);
     gradient.addColorStop(1, "rgba(255,230,40,0)");
     ctx.fillStyle = gradient;
     ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);

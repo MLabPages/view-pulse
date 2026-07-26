@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -38,6 +38,7 @@ const requiredAppMarkers = [
   "randomized-three-pass-nine-point-direct-mapping", "selectDirectGazeMapping", "calibrationRequiredSamples", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
   "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
+  "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "renderRecordingFaceGuide",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -51,7 +52,7 @@ const requiredHtmlMarkers = [
   "YouTube URL", "YouTube選択時は動画再生のためYouTubeへ接続します", "youtubeReactionNote",
   "背景の動画は調整中だけ隠れています",
   'id="calibrationTarget" class="calibration-target" type="button"',
-  'id="faceAlignmentGuide"', "顔の位置・距離・向きを調整時と本測定でそろえます",
+  'id="faceAlignmentGuide"', "顔の位置・距離・向きを調整時と本測定でそろえます", 'id="recordingFaceGuide"',
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);
@@ -88,6 +89,11 @@ if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopol
 }
 
 if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値計算に失敗");
+const referencePose = { faceCenterX: 0.5, faceCenterY: 0.5, yaw: 0, pitch: 0.6, eyeDistance: 0.34 };
+const moderatePose = evaluatePoseQuality({ faceDetected: true, faceCenterX: 0.5, faceCenterY: 0.64, yaw: 0, pitch: 0.6, eyeDistance: 0.34 }, referencePose);
+if (moderatePose.level !== "usable" || moderatePose.weight <= 0) throw new Error("通常の顔移動を利用可能として残せません");
+const extremePose = evaluatePoseQuality({ faceDetected: true, faceCenterX: 0.5, faceCenterY: 0.8, yaw: 0, pitch: 0.6, eyeDistance: 0.34 }, referencePose);
+if (extremePose.level !== "excluded" || extremePose.weight !== 0) throw new Error("極端な顔移動を除外できません");
 const filteredSamples = filterCalibrationSamples([
   { screenX: 0.2, screenY: 0.2 },
   { screenX: 0.21, screenY: 0.19 },

@@ -10,6 +10,28 @@ export function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+export function evaluatePoseQuality(metrics, pose) {
+  if (!pose || !metrics?.faceDetected) {
+    return { level: metrics?.faceDetected ? "good" : "unavailable", weight: metrics?.faceDetected ? 1 : 0, severity: 0, direction: "" };
+  }
+  const deviations = {
+    horizontal: Math.abs(metrics.faceCenterX - pose.faceCenterX) / 0.1,
+    vertical: Math.abs(metrics.faceCenterY - pose.faceCenterY) / 0.1,
+    yaw: Math.abs(metrics.yaw - pose.yaw) / 0.14,
+    pitch: Math.abs(metrics.pitch - pose.pitch) / 0.1,
+    distance: Math.abs(metrics.eyeDistance / Math.max(pose.eyeDistance, 1e-6) - 1) / 0.18,
+  };
+  const [cause, severity] = Object.entries(deviations).sort((a, b) => b[1] - a[1])[0];
+  const level = severity <= 1 ? "good" : severity <= 2.2 ? "usable" : "excluded";
+  const weight = level === "good" ? 1 : level === "usable" ? Math.max(0.45, 1 - (severity - 1) * 0.35) : 0;
+  let direction = "";
+  if (cause === "horizontal") direction = metrics.faceCenterX > pose.faceCenterX ? "顔を少し左へ" : "顔を少し右へ";
+  else if (cause === "vertical") direction = metrics.faceCenterY > pose.faceCenterY ? "顔を少し上へ" : "顔を少し下へ";
+  else if (cause === "distance") direction = metrics.eyeDistance > pose.eyeDistance ? "カメラから少し離れて" : "カメラへ少し近づいて";
+  else direction = "顔を少し正面へ";
+  return { level, weight, severity, direction, deviations };
+}
+
 export function filterCalibrationSamples(samples, minimumDistance = 0.04) {
   if (!samples.length) return { samples: [], excludedCount: 0, rawSpread: NaN, spread: NaN };
   const centerX = median(samples.map((sample) => sample.screenX));
