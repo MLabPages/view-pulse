@@ -7,14 +7,13 @@ const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
-// A specialized-model frame can take several seconds on a CPU-only Worker.
-// One stable frame at each of the nine targets is more useful than failing a
-// whole calibration just because a second frame did not arrive in time.
-const CALIBRATION_MIN_SAMPLES = 1;
-const CALIBRATION_POINT_TIMEOUT_MS = 15000;
-const CALIBRATION_SPREAD_LIMIT = 0.26;
-const CALIBRATION_SAMPLE_TIMEOUT_MS = 6000;
-const CALIBRATION_FIT_TIMEOUT_MS = 60000;
+const CALIBRATION_REPEATS = 3;
+const CALIBRATION_MIN_SAMPLES = 3;
+const CALIBRATION_MAX_SAMPLES = 5;
+const CALIBRATION_SETTLE_MS = 450;
+const CALIBRATION_POINT_TIMEOUT_MS = 20000;
+const CALIBRATION_CLICK_TIMEOUT_MS = 15000;
+const CALIBRATION_SPREAD_LIMIT = 0.18;
 const SPECIALIZED_GAZE_CAPTURE_WIDTH = 640;
 const SPECIALIZED_GAZE_WORKER_URL = new URL("./vendor/webeyetrack/webeyetrack.worker.js", import.meta.url);
 const SPECIALIZED_GAZE_MODEL_URL = new URL("./web/model.json", import.meta.url);
@@ -29,13 +28,6 @@ const CALIBRATION_POINTS = [
 const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.32 }, { x: 0.68, y: 0.32 },
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
-];
-// Measured after the model has been adapted, to remove any remaining
-// systematic shrink or offset before the untouched validation points run.
-const CALIBRATION_CORRECTION_POINTS = [
-  { x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 },
-  { x: 0.5, y: 0.5 },
-  { x: 0.15, y: 0.85 }, { x: 0.85, y: 0.85 },
 ];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
 const MAX_VALIDATION_MEAN_DIAGONAL_RATIO = 0.12;
@@ -99,9 +91,6 @@ let specializedGaze = null;
 let webEyeLastStepError = "";
 let webEyeBackend = "";
 let webEyeEyesClosed = 0;
-let pendingSampleAck = null;
-let pendingFitAck = null;
-let calibrationFitting = false;
 let analysisRunning = false;
 let analysisRaf = 0;
 let lastAnalysisAt = 0;
@@ -113,6 +102,7 @@ let recordTimer = 0;
 let samples = [];
 let calibrationModel = null;
 let calibrationCollect = null;
+let calibrationCollectAfter = 0;
 let recordingGeometry = null;
 let reactionRaf = 0;
 let contentResultUrl = "";
@@ -432,20 +422,6 @@ function loadSpecializedGazeModel() {
         updateSpecializedGaze(message.result);
       } else if (message.type === "stepSkipped") {
         webEyeBusy = false;
-      } else if (message.type === "sampleCollected") {
-        pendingSampleAck?.(true);
-      } else if (message.type === "sampleError") {
-        pendingSampleAck?.(message.message || "unknown");
-      } else if (message.type === "calibrated") {
-        webEyeBusy = false;
-        pendingFitAck?.({
-          count: message.count || 0,
-          durationMs: message.durationMs || 0,
-          learningSteps: message.learningSteps || 0,
-        });
-      } else if (message.type === "calibrateError") {
-        webEyeBusy = false;
-        pendingFitAck?.(message.message || "unknown");
       } else if (message.type === "statusUpdate" && message.status === "idle") {
         webEyeBusy = false;
       }
@@ -479,9 +455,7 @@ function stopSpecializedGazeModel() {
   webEyeContext = null;
   webEyeBackend = "";
   webEyeEyesClosed = 0;
-  pendingSampleAck = null;
-  pendingFitAck = null;
-  calibrationFitting = false;
+  calibrationCollectAfter = 0;
 }
 
 function updateSpecializedGaze(result) {
@@ -503,16 +477,17 @@ function updateSpecializedGaze(result) {
     receivedAt: performance.now(),
     modelTimestamp: result.timestamp,
   };
-  if (calibrationCollect && latestMetrics?.faceDetected) {
+  if (calibrationCollect && latestMetrics?.faceDetected && (result.timestamp ?? 0) >= calibrationCollectAfter) {
     calibrationCollect.push({
       screenX, screenY,
       yaw: latestMetrics.yaw, pitch: latestMetrics.pitch, eyeDistance: latestMetrics.eyeDistance,
+      modelTimestamp: result.timestamp, receivedAt: performance.now(),
     });
   }
 }
 
 function requestSpecializedGaze(now) {
-  if (!webEyeReady || webEyeBusy || calibrationFitting || !webEyeWorker || els.frontPreview.readyState < 2) return;
+  if (!webEyeReady || webEyeBusy || !webEyeWorker || els.frontPreview.readyState < 2) return;
   if (now - webEyeLastAt < SPECIALIZED_GAZE_INTERVAL_MS) return;
   webEyeLastAt = now;
   // A wider frame keeps the eye region detailed enough for the gaze model.
@@ -603,110 +578,82 @@ function projectScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeo
 }
 
 function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry(), options = {}) {
+  const directMapping = "directMapping" in options ? options.directMapping : calibrationModel?.direct_mapping;
+  if (directMapping?.mode === "quadratic2d") {
+    const mapped = applyDirectGazeMapping(screenX, screenY, directMapping);
+    return mapped ? { x: clamp(mapped.x, 0, 1), y: clamp(mapped.y, 0, 1) } : null;
+  }
   const raw = projectScreenGazeToMedia(screenX, screenY, geometry);
   if (!raw) return null;
-  const correction = "correction" in options ? options.correction : calibrationModel?.correction;
-  const corrected = applyGazeCorrection(raw, correction);
-  return { x: clamp(corrected.x, 0, 1), y: clamp(corrected.y, 0, 1) };
+  return { x: clamp(raw.x, 0, 1), y: clamp(raw.y, 0, 1) };
 }
 
-function applyGazeCorrection(point, correction) {
-  if (!correction) return point;
-  if (correction.mode === "affine2d" && Array.isArray(correction.matrix) && correction.matrix.length === 6) {
-    const [xx, xy, xOffset, yx, yy, yOffset] = correction.matrix;
-    return {
-      x: xx * point.x + xy * point.y + xOffset,
-      y: yx * point.x + yy * point.y + yOffset,
-    };
-  }
-  return {
-    x: correction.x.scale * point.x + correction.x.offset,
-    y: correction.y.scale * point.y + correction.y.offset,
+function directMappingFeatures(screenX, screenY, mapping) {
+  const x = (screenX - mapping.center.x) / mapping.scale.x;
+  const y = (screenY - mapping.center.y) / mapping.scale.y;
+  return [1, x, y, x * x, x * y, y * y];
+}
+
+function applyDirectGazeMapping(screenX, screenY, mapping) {
+  if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return null;
+  const features = directMappingFeatures(screenX, screenY, mapping);
+  const x = features.reduce((sum, value, index) => sum + value * mapping.x_coefficients[index], 0);
+  const y = features.reduce((sum, value, index) => sum + value * mapping.y_coefficients[index], 0);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+
+function fitDirectGazeMapping(points) {
+  if (points.length < CALIBRATION_POINTS.length) return null;
+  const centerX = median(points.map((point) => point.screenX));
+  const centerY = median(points.map((point) => point.screenY));
+  const rangeX = Math.max(...points.map((point) => point.screenX)) - Math.min(...points.map((point) => point.screenX));
+  const rangeY = Math.max(...points.map((point) => point.screenY)) - Math.min(...points.map((point) => point.screenY));
+  const mapping = {
+    mode: "quadratic2d",
+    center: { x: centerX, y: centerY },
+    scale: { x: Math.max(rangeX / 2, 0.03), y: Math.max(rangeY / 2, 0.03) },
   };
-}
-
-function fitGazeCorrection(samples) {
-  // Residual errors after the gaze-model fit can be diagonal: for example,
-  // looking right may also shift the predicted point down. Independent X/Y
-  // scaling cannot correct that, while a 2D affine transform can.
-  const affine = fitAffineCorrection(samples);
-  if (affine) {
-    return {
-      mode: "affine2d",
-      matrix: affine,
-      points: samples.map((s) => ({ x: round(s.x), y: round(s.y), target_x: s.targetX, target_y: s.targetY })),
-    };
-  }
-  return {
-    mode: "axis",
-    x: fitCorrectionAxis(samples.map((s) => s.x), samples.map((s) => s.targetX)),
-    y: fitCorrectionAxis(samples.map((s) => s.y), samples.map((s) => s.targetY)),
-    points: samples.map((s) => ({ x: round(s.x), y: round(s.y), target_x: s.targetX, target_y: s.targetY })),
-  };
-}
-
-function fitAffineCorrection(samples) {
-  if (samples.length < 3) return null;
-  // Ridge regression keeps five noisy correction points from producing an
-  // implausibly large transform, while favouring the identity correction.
-  const ridge = 0.025;
-  const normal = [[ridge, 0, 0], [0, ridge, 0], [0, 0, ridge]];
-  const targetX = [ridge, 0, 0];
-  const targetY = [0, ridge, 0];
-  for (const sample of samples) {
-    const row = [sample.x, sample.y, 1];
-    for (let i = 0; i < 3; i++) {
-      targetX[i] += row[i] * sample.targetX;
-      targetY[i] += row[i] * sample.targetY;
-      for (let j = 0; j < 3; j++) normal[i][j] += row[i] * row[j];
+  const size = 6;
+  const normal = Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? (row < 3 ? 0.01 : 0.04) : 0));
+  const targetX = Array(size).fill(0);
+  const targetY = Array(size).fill(0);
+  for (const point of points) {
+    const row = directMappingFeatures(point.screenX, point.screenY, mapping);
+    for (let i = 0; i < size; i++) {
+      targetX[i] += row[i] * point.targetX;
+      targetY[i] += row[i] * point.targetY;
+      for (let j = 0; j < size; j++) normal[i][j] += row[i] * row[j];
     }
   }
-  const x = solveLinearSystem(normal, targetX);
-  const y = solveLinearSystem(normal, targetY);
-  if (!x || !y) return null;
-  const matrix = [...x, ...y];
-  const xScale = Math.hypot(matrix[0], matrix[1]);
-  const yScale = Math.hypot(matrix[3], matrix[4]);
-  // A singular/noisy fit would make the heatmap look certain while being
-  // wildly wrong. Keep the existing axis-only fallback in that case.
-  if (!matrix.every(Number.isFinite) || xScale < 0.2 || xScale > 5 || yScale < 0.2 || yScale > 5
-    || Math.abs(matrix[2]) > 1.5 || Math.abs(matrix[5]) > 1.5) return null;
-  return matrix.map((value) => round(value));
+  const xCoefficients = solveLinearSystem(normal, targetX);
+  const yCoefficients = solveLinearSystem(normal, targetY);
+  if (!xCoefficients || !yCoefficients || ![...xCoefficients, ...yCoefficients].every(Number.isFinite)) return null;
+  return {
+    ...mapping,
+    x_coefficients: xCoefficients,
+    y_coefficients: yCoefficients,
+  };
 }
 
 function solveLinearSystem(matrix, vector) {
   const rows = matrix.map((row, index) => [...row, vector[index]]);
-  for (let column = 0; column < 3; column++) {
+  const size = matrix.length;
+  for (let column = 0; column < size; column++) {
     let pivot = column;
-    for (let row = column + 1; row < 3; row++) {
+    for (let row = column + 1; row < size; row++) {
       if (Math.abs(rows[row][column]) > Math.abs(rows[pivot][column])) pivot = row;
     }
     if (Math.abs(rows[pivot][column]) < 1e-7) return null;
     [rows[column], rows[pivot]] = [rows[pivot], rows[column]];
     const divisor = rows[column][column];
-    for (let index = column; index < 4; index++) rows[column][index] /= divisor;
-    for (let row = 0; row < 3; row++) {
+    for (let index = column; index <= size; index++) rows[column][index] /= divisor;
+    for (let row = 0; row < size; row++) {
       if (row === column) continue;
       const factor = rows[row][column];
-      for (let index = column; index < 4; index++) rows[row][index] -= factor * rows[column][index];
+      for (let index = column; index <= size; index++) rows[row][index] -= factor * rows[column][index];
     }
   }
-  return rows.map((row) => row[3]);
-}
-
-function fitCorrectionAxis(values, targets) {
-  const count = values.length;
-  const meanValue = values.reduce((sum, value) => sum + value, 0) / count;
-  const meanTarget = targets.reduce((sum, value) => sum + value, 0) / count;
-  const variance = values.reduce((sum, value) => sum + (value - meanValue) ** 2, 0);
-  const covariance = values.reduce((sum, value, index) => sum + (value - meanValue) * (targets[index] - meanTarget), 0);
-  const slope = variance > 1e-4 ? covariance / variance : 0;
-  // Fall back to a shift-only correction when the samples are too noisy to
-  // trust a scale factor.
-  if (!Number.isFinite(slope) || slope < 0.2 || slope > 8) {
-    return { scale: 1, offset: meanTarget - meanValue, mode: "offset" };
-  }
-  return { scale: slope, offset: meanTarget - slope * meanValue, mode: "linear" };
+  return rows.map((row) => row[size]);
 }
 
 function mapGaze(metrics = null, { skipPoseCheck = false } = {}) {
@@ -744,6 +691,7 @@ function sampleMetrics(now, metrics) {
     gaze_excluded_motion: metrics?.faceDetected && specializedGaze && !gaze ? 1 : 0,
     raw_gaze_x: round(specializedGaze?.screenX), raw_gaze_y: round(specializedGaze?.screenY),
     gaze_engine: "webeyetrack",
+    gaze_quality: calibrationModel?.validation?.status || "unavailable",
     eye_distance: round(metrics?.eyeDistance),
     gaze_zone: gaze ? gazeZone(gaze.x, gaze.y) : "",
     attention: metrics?.attention ?? 0,
@@ -771,42 +719,39 @@ async function runCalibration() {
   const observations = [];
   try {
     webEyeEyesClosed = 0;
-    resetSpecializedGazeCalibration();
-    for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
-      observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "動画内の点を見てください", geometry, true));
+    const automatic = usesAutomaticCalibration();
+    const sequence = buildCalibrationSequence();
+    for (let i = 0; i < sequence.length; i++) {
+      const item = sequence[i];
+      observations.push(await collectCalibrationTrial(item, i, sequence.length, geometry, automatic));
     }
-    els.calibrationInstruction.textContent = "視線の対応関係を作成しています…";
-    els.calibrationProgress.textContent = "学習中（最大60秒）";
-    const fitted = await fitSpecializedGazeCalibration();
-    if (!fitted || typeof fitted !== "object") throw new Error(`視線の学習に失敗しました（${fitted}）`);
+    const representatives = summarizeCalibrationPoints(observations);
+    const directMapping = fitDirectGazeMapping(representatives);
+    if (!directMapping) throw new Error("9点の視線座標から変換を作成できませんでした");
     calibrationModel = {
       engine: "webeyetrack",
       engine_version: "0.0.2",
       backend: webEyeBackend,
+      method: "randomized-nine-point-direct-mapping",
       calibration_points: CALIBRATION_POINTS.length,
+      calibration_repeats: CALIBRATION_REPEATS,
+      calibration_trials: observations.length,
+      samples_per_trial: { minimum: CALIBRATION_MIN_SAMPLES, maximum: CALIBRATION_MAX_SAMPLES },
+      confirmation: automatic ? "automatic" : "click",
       pose: medianPose(observations),
       viewport: currentViewport(),
       geometry,
       observations,
-      fit_duration_ms: fitted.durationMs,
-      fit_learning_steps: fitted.learningSteps,
+      representative_points: representatives,
+      direct_mapping: directMapping,
     };
-    // Adaptation alone still leaves a systematic shrink toward the centre, so
-    // measure it on a few known points and correct for it before validating.
-    const correctionSamples = [];
-    for (let i = 0; i < CALIBRATION_CORRECTION_POINTS.length; i++) {
-      const point = CALIBRATION_CORRECTION_POINTS[i];
-      const observed = await collectCalibrationPoint(point, i, CALIBRATION_CORRECTION_POINTS.length, "もう一度、点を見てください", geometry, false);
-      const projected = projectScreenGazeToMedia(observed.screenX, observed.screenY, geometry);
-      if (!projected) throw new Error("視線座標を動画上に変換できませんでした");
-      correctionSamples.push({ ...projected, targetX: point.x, targetY: point.y });
-    }
-    calibrationModel.correction = fitGazeCorrection(correctionSamples);
+    calibrationModel.training_points = buildCalibrationChecks(representatives, geometry);
     let qualityMessage = "視線調整が完了しました";
     try {
       const validations = [];
-      for (let i = 0; i < CALIBRATION_VALIDATION_POINTS.length; i++) {
-        validations.push(await collectCalibrationPoint(CALIBRATION_VALIDATION_POINTS[i], i, CALIBRATION_VALIDATION_POINTS.length, "精度を確認しています", geometry, false));
+      const validationSequence = shuffleCalibrationPoints(CALIBRATION_VALIDATION_POINTS);
+      for (let i = 0; i < validationSequence.length; i++) {
+        validations.push(await collectCalibrationTrial(validationSequence[i], i, validationSequence.length, geometry, automatic, "精度を確認しています"));
       }
       const checks = validations.map((point) => {
         const mapped = mapScreenGazeToMedia(point.screenX, point.screenY, geometry);
@@ -831,7 +776,7 @@ async function runCalibration() {
         mean_diagonal_ratio: round(meanDiagonalRatio), max_diagonal_ratio: round(maxDiagonalRatio),
       };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
-      if (!accepted) qualityMessage += "。精度基準を満たさないため、記録は開始できません。端末の固定だけでは改善しないため、再調整しても改善しない場合は、この環境ではWeb版の視線座標を研究用精度で取得できません。";
+      if (!accepted) qualityMessage += "。低精度として記録できます。細かな注視点ではなく、大きな領域（AOI）の傾向として扱ってください。";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
       calibrationModel.validation = { status: "unavailable", accepted: false, reason: validationError.message || "unknown" };
@@ -839,8 +784,10 @@ async function runCalibration() {
     }
     els.captureHint.textContent = qualityMessage;
     const accepted = calibrationModel.validation?.accepted === true;
-    els.calibrateButton.innerHTML = accepted ? "<span>✓</span>調整済み" : "<span>◎</span>再調整";
-    els.recordButton.disabled = !accepted;
+    const usable = ["accepted", "rejected"].includes(calibrationModel.validation?.status);
+    els.calibrateButton.innerHTML = accepted ? "<span>✓</span>調整済み" : usable ? "<span>△</span>低精度" : "<span>◎</span>再調整";
+    els.recordButton.disabled = !usable;
+    els.recordButton.title = accepted ? "記録開始" : usable ? "低精度の視線データとして記録開始" : "視線調整が必要です";
   } catch (error) {
     console.warn(error);
     calibrationModel = null;
@@ -848,49 +795,146 @@ async function runCalibration() {
     els.captureHint.textContent = `視線調整を完了できませんでした（${error.message || "視線を検出できませんでした"}）。照明・眼鏡・顔の向きでも検出が不安定になることがあります。`;
   } finally {
     calibrationCollect = null;
+    calibrationCollectAfter = 0;
+    els.calibrationTarget.classList.remove("ready");
+    els.calibrationTarget.disabled = true;
     els.calibrationLayer.classList.add("hidden");
     els.previewModeSwitch.classList.remove("hidden");
     els.calibrateButton.disabled = false;
-    if (!recording) els.recordButton.disabled = calibrationModel?.validation?.accepted !== true;
+    if (!recording) els.recordButton.disabled = !["accepted", "rejected"].includes(calibrationModel?.validation?.status);
   }
 }
 
-async function collectCalibrationPoint(point, index, total, instruction, geometry, trainModel) {
-  els.calibrationInstruction.textContent = instruction;
+function usesAutomaticCalibration() {
+  const iPadDesktopMode = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+  return iPadDesktopMode || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+}
+
+function shuffleCalibrationPoints(points) {
+  const shuffled = points.map((point) => ({ ...point }));
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+function buildCalibrationSequence() {
+  const sequence = [];
+  for (let repeat = 0; repeat < CALIBRATION_REPEATS; repeat++) {
+    const batch = shuffleCalibrationPoints(CALIBRATION_POINTS);
+    if (sequence.length && batch[0].x === sequence.at(-1).x && batch[0].y === sequence.at(-1).y) {
+      [batch[0], batch[1]] = [batch[1], batch[0]];
+    }
+    batch.forEach((point) => sequence.push({ ...point, repeat: repeat + 1 }));
+  }
+  return sequence;
+}
+
+async function collectCalibrationTrial(point, index, total, geometry, automatic, instruction = "") {
+  els.calibrationInstruction.textContent = instruction || (automatic ? "点を見続けてください（自動取得）" : "点を見てください");
   els.calibrationTarget.style.left = `${geometry.media.x + point.x * geometry.media.width}px`;
   els.calibrationTarget.style.top = `${geometry.media.y + point.y * geometry.media.height}px`;
   els.calibrationProgress.textContent = `${index + 1} / ${total}`;
+  els.calibrationTarget.classList.remove("ready");
+  els.calibrationTarget.disabled = true;
+  calibrationCollect = null;
+  await delay(CALIBRATION_SETTLE_MS);
   calibrationCollect = [];
-  await delay(600);
-  // Restart collection so samples from the previous target are never mixed in.
-  calibrationCollect = [];
+  calibrationCollectAfter = performance.now();
   webEyeLastStepError = "";
+  webEyeEyesClosed = 0;
   const startedAt = performance.now();
   while (calibrationCollect.length < CALIBRATION_MIN_SAMPLES
     && performance.now() - startedAt < CALIBRATION_POINT_TIMEOUT_MS) {
+    els.calibrationProgress.textContent = `${index + 1} / ${total}・視線 ${Math.min(calibrationCollect.length, CALIBRATION_MIN_SAMPLES)} / ${CALIBRATION_MIN_SAMPLES}`;
     await delay(120);
   }
   if (calibrationCollect.length < CALIBRATION_MIN_SAMPLES) {
     throw new Error(calibrationPointFailureReason());
   }
-  const screenX = median(calibrationCollect.map((p) => p.screenX));
-  const screenY = median(calibrationCollect.map((p) => p.screenY));
-  const spread = median(calibrationCollect.map((p) => Math.hypot(p.screenX - screenX, p.screenY - screenY)));
-  if (spread > CALIBRATION_SPREAD_LIMIT) throw new Error("視線が大きく動いていました");
-  const observation = {
-    screenX, screenY, targetX: point.x, targetY: point.y,
-    yaw: median(calibrationCollect.map((p) => p.yaw)),
-    pitch: median(calibrationCollect.map((p) => p.pitch)),
-    eyeDistance: median(calibrationCollect.map((p) => p.eyeDistance)),
-  };
-  if (trainModel) {
-    const target = calibrationTargetToScreen(point, geometry);
-    if (!webEyeWorker || !webEyeReady) throw new Error("専用視線モデルとの接続が切れました");
-    const captured = await captureCalibrationSample(target);
-    if (captured !== true) throw new Error(`この位置を記録できませんでした（${captured}）`);
+  if (automatic) {
+    els.calibrationInstruction.textContent = instruction ? `${instruction}（そのまま見続けてください）` : "そのまま見続けてください（自動取得）";
+    const extraUntil = performance.now() + 1000;
+    while (calibrationCollect.length < CALIBRATION_MAX_SAMPLES && performance.now() < extraUntil) await delay(100);
+  } else {
+    els.calibrationInstruction.textContent = instruction ? `${instruction}。点を見たままクリックしてください` : "点を見たままクリックしてください";
+    els.calibrationTarget.disabled = false;
+    els.calibrationTarget.classList.add("ready");
+    const clicked = await waitForCalibrationTargetClick(CALIBRATION_CLICK_TIMEOUT_MS);
+    if (!clicked) throw new Error("注視点のクリックを確認できませんでした");
   }
+  const selected = calibrationCollect.slice(-CALIBRATION_MAX_SAMPLES);
   calibrationCollect = null;
-  return observation;
+  calibrationCollectAfter = 0;
+  els.calibrationTarget.disabled = true;
+  els.calibrationTarget.classList.remove("ready");
+  const screenX = median(selected.map((sample) => sample.screenX));
+  const screenY = median(selected.map((sample) => sample.screenY));
+  const spread = median(selected.map((sample) => Math.hypot(sample.screenX - screenX, sample.screenY - screenY)));
+  if (spread > CALIBRATION_SPREAD_LIMIT) throw new Error("視線が大きく動いていました");
+  return {
+    screenX, screenY, targetX: point.x, targetY: point.y,
+    repeat: point.repeat || 0,
+    sequence: index + 1,
+    sample_count: selected.length,
+    spread: round(spread),
+    yaw: median(selected.map((sample) => sample.yaw)),
+    pitch: median(selected.map((sample) => sample.pitch)),
+    eyeDistance: median(selected.map((sample) => sample.eyeDistance)),
+    raw_samples: selected.map((sample) => ({
+      screen_x: round(sample.screenX), screen_y: round(sample.screenY),
+      yaw: round(sample.yaw), pitch: round(sample.pitch), eye_distance: round(sample.eyeDistance),
+      model_timestamp: round(sample.modelTimestamp),
+    })),
+  };
+}
+
+function waitForCalibrationTargetClick(timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      els.calibrationTarget.removeEventListener("click", onClick);
+      resolve(value);
+    };
+    const onClick = () => finish(true);
+    const timeout = window.setTimeout(() => finish(false), timeoutMs);
+    els.calibrationTarget.addEventListener("click", onClick, { once: true });
+  });
+}
+
+function summarizeCalibrationPoints(observations) {
+  return CALIBRATION_POINTS.map((target) => {
+    const trials = observations.filter((point) => point.targetX === target.x && point.targetY === target.y);
+    if (trials.length < CALIBRATION_REPEATS) throw new Error("同じ注視点を3回確認できませんでした");
+    return {
+      screenX: median(trials.map((point) => point.screenX)),
+      screenY: median(trials.map((point) => point.screenY)),
+      targetX: target.x,
+      targetY: target.y,
+      trial_count: trials.length,
+      trial_raw_points: trials.map((point) => ({ screen_x: round(point.screenX), screen_y: round(point.screenY), sample_count: point.sample_count })),
+    };
+  });
+}
+
+function buildCalibrationChecks(points, geometry) {
+  return points.map((point) => {
+    const mapped = mapScreenGazeToMedia(point.screenX, point.screenY, geometry);
+    const errorX = mapped.x - point.targetX;
+    const errorY = mapped.y - point.targetY;
+    return {
+      raw_screen_x: round(point.screenX), raw_screen_y: round(point.screenY),
+      target_x: point.targetX, target_y: point.targetY,
+      predicted_x: round(mapped.x), predicted_y: round(mapped.y),
+      error_x: round(errorX), error_y: round(errorY),
+      error_px: round(Math.hypot(errorX * geometry.media.width, errorY * geometry.media.height)),
+      trial_count: point.trial_count,
+    };
+  });
 }
 
 function calibrationPointFailureReason() {
@@ -898,59 +942,6 @@ function calibrationPointFailureReason() {
   if (!latestMetrics?.faceDetected) return "顔を検出できませんでした";
   if (webEyeEyesClosed > 0) return "目が閉じていると判定されました。明るい場所で、目を大きく開いてお試しください";
   return "視線を十分に検出できませんでした";
-}
-
-function captureCalibrationSample(target) {
-  // Snapshot only. Training is deferred until every target has been shown.
-  return workerRequest(
-    { type: "collectSample", payload: target },
-    (finish) => { pendingSampleAck = finish; },
-    () => { pendingSampleAck = null; },
-    CALIBRATION_SAMPLE_TIMEOUT_MS,
-  );
-}
-
-function fitSpecializedGazeCalibration() {
-  // The original fine-tuning step requires a backward pass over nine large eye
-  // images. In a CPU Worker that often exceeds the timeout. The upstream
-  // adaptor already computes an affine mapping from the nine measured points;
-  // keep that fast, deterministic mapping and use the later five-point
-  // correction for remaining bias.
-  calibrationFitting = true;
-  return workerRequest(
-    { type: "fitCalibration", payload: { steps: 0 } },
-    (finish) => { pendingFitAck = finish; },
-    () => { pendingFitAck = null; calibrationFitting = false; },
-    CALIBRATION_FIT_TIMEOUT_MS,
-  );
-}
-
-function resetSpecializedGazeCalibration() {
-  webEyeWorker?.postMessage({ type: "resetCalibration" });
-}
-
-function workerRequest(message, register, cleanup, timeoutMs) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      cleanup();
-      resolve(value);
-    };
-    const timeout = window.setTimeout(() => finish("時間内に応答がありませんでした"), timeoutMs);
-    register(finish);
-    webEyeWorker.postMessage(message);
-  });
-}
-
-function calibrationTargetToScreen(point, geometry) {
-  const captureRect = els.captureScreen.getBoundingClientRect();
-  return {
-    x: (captureRect.left + geometry.media.x + point.x * geometry.media.width) / window.innerWidth - 0.5,
-    y: (captureRect.top + geometry.media.y + point.y * geometry.media.height) / window.innerHeight - 0.5,
-  };
 }
 
 function medianPose(observations) {
@@ -1018,7 +1009,8 @@ function makeRecorder(stream, chunks) {
 
 async function startRecording() {
   if (!frontStream || recording || stopping) return;
-  if (!calibrationModel?.geometry || calibrationModel.validation?.accepted !== true) {
+  const validationStatus = calibrationModel?.validation?.status;
+  if (!calibrationModel?.geometry || !["accepted", "rejected"].includes(validationStatus)) {
     els.recordButton.disabled = true;
     els.captureHint.textContent = "視線調整が必要です。動画内の点を見ながら「視線調整」を完了してください";
     return;
@@ -1425,8 +1417,10 @@ function summarizeResults() {
   els.metricZone.textContent = zoneLabel(topZone);
   const seconds = Math.round((samples.at(-1)?.elapsed_ms || 0) / 1000);
   const kindLabel = contentKind === "image" ? "画像" : contentKind === "youtube" ? "YouTube動画" : "動画";
+  const qualityStatus = calibrationModel?.validation?.status || samples.find((sample) => sample.gaze_quality)?.gaze_quality;
+  const qualityPrefix = qualityStatus === "rejected" ? "低精度の視線推定です。大きな領域（AOI）の傾向として確認してください。" : "";
   els.resultSummary.textContent = tracked.length
-    ? `${kindLabel}と${seconds}秒間の反応から、${tracked.length}点の視線・表情データを同期しました。`
+    ? `${qualityPrefix}${kindLabel}と${seconds}秒間の反応から、${tracked.length}点の視線・表情データを同期しました。`
     : `${kindLabel}と反応を保存しました。この記録では視線データを十分に取得できませんでした。`;
 }
 
@@ -1731,7 +1725,7 @@ function downloadBlob(blob, name) {
 function captureDataBlob(capture) {
   return new Blob([JSON.stringify({
     app: "ViewPulse",
-    schema_version: 5,
+    schema_version: 6,
     capture_id: capture.id || "",
     created_at: capture.created_at || new Date().toISOString(),
     content: {
@@ -1743,7 +1737,7 @@ function captureDataBlob(capture) {
       duration_ms: capture.content_duration_ms || contentDurationMs,
     },
     synchronization: capture.content_kind === "image" ? "elapsed_ms" : capture.content_kind === "youtube" ? "youtube_playback_ms" : "content_playback_ms",
-    calibration: capture.calibration_model ? "nine-point" : "uncalibrated",
+    calibration: capture.calibration_model?.method || (capture.calibration_model ? "nine-point" : "uncalibrated"),
     calibration_model: capture.calibration_model || null,
     recording_geometry: capture.recording_geometry || null,
     samples: capture.samples || [],
