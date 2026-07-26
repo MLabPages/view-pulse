@@ -1103,6 +1103,12 @@ async function createContentThumbnail() {
   return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.76));
 }
 
+function youtubeThumbnailUrl(videoId) {
+  const safeId = String(videoId || "").trim();
+  if (!/^[A-Za-z0-9_-]{6,}$/.test(safeId)) return "";
+  return `https://i.ytimg.com/vi/${encodeURIComponent(safeId)}/hqdefault.jpg`;
+}
+
 function newCaptureId() {
   return crypto.randomUUID?.() || `capture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -1159,6 +1165,11 @@ async function renderLibrary() {
 function createLibraryCard(capture) {
   const card = document.createElement("article");
   card.className = "library-card";
+  const openTarget = document.createElement("button");
+  openTarget.type = "button";
+  openTarget.className = "library-open-target";
+  openTarget.setAttribute("aria-label", `${capture.content_name}の分析を開く`);
+  openTarget.addEventListener("click", () => openLibraryCapture(capture.id));
   const thumb = document.createElement("div");
   thumb.className = "library-thumb";
   thumb.dataset.kind = capture.content_kind;
@@ -1169,6 +1180,15 @@ function createLibraryCard(capture) {
     img.src = url;
     img.alt = "表示コンテンツのサムネイル";
     thumb.append(img);
+  } else if (capture.content_kind === "youtube") {
+    const thumbnailUrl = youtubeThumbnailUrl(capture.youtube_video_id);
+    if (thumbnailUrl) {
+      const img = document.createElement("img");
+      img.src = thumbnailUrl;
+      img.alt = "YouTube動画のサムネイル";
+      img.addEventListener("error", () => img.remove(), { once: true });
+      thumb.append(img);
+    }
   }
   const meta = document.createElement("div");
   meta.className = "library-meta";
@@ -1184,7 +1204,7 @@ function createLibraryCard(capture) {
   const actions = document.createElement("div");
   actions.className = "library-card-actions";
   const openButton = document.createElement("button");
-  openButton.textContent = "分析を見る";
+  openButton.textContent = "分析を開く";
   openButton.addEventListener("click", () => openLibraryCapture(capture.id));
   const shareButton = document.createElement("button");
   shareButton.textContent = "共有";
@@ -1195,7 +1215,8 @@ function createLibraryCard(capture) {
   deleteButton.setAttribute("aria-label", `${title.textContent}を削除`);
   deleteButton.addEventListener("click", () => deleteLibraryCapture(capture.id));
   actions.append(openButton, shareButton, deleteButton);
-  card.append(thumb, meta, actions);
+  openTarget.append(thumb, meta);
+  card.append(openTarget, actions);
   return card;
 }
 
