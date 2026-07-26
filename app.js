@@ -1,5 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -788,8 +788,9 @@ function findUnstableCalibrationTargets(observations) {
     const first = trials[0];
     const second = trials[1];
     const repeatDifference = Math.hypot(first.screenX - second.screenX, first.screenY - second.screenY);
+    const unstableTrial = trials.some((trial) => trial.unstable);
     const withinTrialSpread = Math.max(...trials.map((trial) => trial.spread || 0));
-    return repeatDifference > CALIBRATION_REPEAT_DIFFERENCE_LIMIT || withinTrialSpread > CALIBRATION_REPEAT_DIFFERENCE_LIMIT;
+    return unstableTrial || repeatDifference > CALIBRATION_REPEAT_DIFFERENCE_LIMIT || withinTrialSpread > CALIBRATION_REPEAT_DIFFERENCE_LIMIT;
   });
 }
 
@@ -831,19 +832,26 @@ async function collectCalibrationTrial(point, index, total, geometry, automatic,
   calibrationCollectAfter = 0;
   els.calibrationTarget.disabled = true;
   els.calibrationTarget.classList.remove("ready");
-  const screenX = median(selected.map((sample) => sample.screenX));
-  const screenY = median(selected.map((sample) => sample.screenY));
-  const spread = median(selected.map((sample) => Math.hypot(sample.screenX - screenX, sample.screenY - screenY)));
-  if (spread > CALIBRATION_SPREAD_LIMIT) throw new Error("視線が大きく動いていました");
+  const filtered = filterCalibrationSamples(selected);
+  const used = filtered.samples;
+  const screenX = median(used.map((sample) => sample.screenX));
+  const screenY = median(used.map((sample) => sample.screenY));
+  const unstable = filtered.rawSpread > CALIBRATION_SPREAD_LIMIT
+    || filtered.spread > CALIBRATION_REPEAT_DIFFERENCE_LIMIT
+    || filtered.excludedCount > 0;
   return {
     screenX, screenY, targetX: point.x, targetY: point.y,
     repeat: point.repeat || 0,
     sequence: index + 1,
     sample_count: selected.length,
-    spread: round(spread),
-    yaw: median(selected.map((sample) => sample.yaw)),
-    pitch: median(selected.map((sample) => sample.pitch)),
-    eyeDistance: median(selected.map((sample) => sample.eyeDistance)),
+    used_sample_count: used.length,
+    excluded_outliers: filtered.excludedCount,
+    raw_spread: round(filtered.rawSpread),
+    spread: round(filtered.spread),
+    unstable,
+    yaw: median(used.map((sample) => sample.yaw)),
+    pitch: median(used.map((sample) => sample.pitch)),
+    eyeDistance: median(used.map((sample) => sample.eyeDistance)),
     raw_samples: selected.map((sample) => ({
       screen_x: round(sample.screenX), screen_y: round(sample.screenY),
       yaw: round(sample.yaw), pitch: round(sample.pitch), eye_distance: round(sample.eyeDistance),
