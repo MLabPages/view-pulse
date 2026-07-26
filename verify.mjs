@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
+import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -42,6 +43,7 @@ const requiredAppMarkers = [
   'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "順序が一貫しなかったため記録を開始できません", "mapped_out_of_bounds",
   "3段階の順序と確認点の精度基準を満たしたため記録できます", "vertical_error", "verticalOrderConsistent",
   "resolveMappedGaze", "gaze_at_edge", "gaze_edge_overflow",
+  "createYouTubeContentSync", "gaze_valid_for_content", "pause_reason", "youtube_time_not_advancing", "動画本編の開始を待っています", "記録を開始しました",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -142,9 +144,31 @@ const syntheticErrors = syntheticTargets.map((point) => {
 });
 if (Math.max(...syntheticErrors) > 0.015) throw new Error("視線座標変換の数値精度が不足");
 
+const youtubeSync = createYouTubeContentSync({ requiredProgressTicks: 3 });
+for (const time of [0, 0, 0.1, 0.1]) {
+  const state = youtubeSync.observe({ currentTime: time, playerState: 1 });
+  if (!state.waiting || state.validForContent) throw new Error("本編時間が進まない開始待機を維持できません");
+}
+for (const [index, time] of [0.25, 0.5, 0.75, 1.0].entries()) {
+  const state = youtubeSync.observe({ currentTime: time, playerState: 1 });
+  if (index < 2 && (!state.waiting || state.validForContent)) throw new Error("連続進行の確認前に記録を開始しています");
+  if (index === 2 && (!state.startedNow || !state.validForContent)) throw new Error("本編時間の連続進行後に記録を開始できません");
+}
+const pausedYoutubeState = youtubeSync.observe({ currentTime: 1.0, playerState: 2 });
+if (pausedYoutubeState.validForContent || pausedYoutubeState.pauseReason !== "youtube_time_not_advancing") throw new Error("停止中のYouTube視線を除外できません");
+const resumedYoutubeState = youtubeSync.observe({ currentTime: 1.25, playerState: 1 });
+if (!resumedYoutubeState.validForContent || resumedYoutubeState.pauseReason) throw new Error("YouTube再開後に有効記録へ復帰できません");
+const normalYoutubeSync = createYouTubeContentSync({ requiredProgressTicks: 2 });
+normalYoutubeSync.observe({ currentTime: 0.2, playerState: 1 });
+normalYoutubeSync.observe({ currentTime: 0.4, playerState: 1 });
+const normalYoutubeStart = normalYoutubeSync.observe({ currentTime: 0.6, playerState: 1 });
+const normalYoutubePlayback = normalYoutubeSync.observe({ currentTime: 0.8, playerState: 1 });
+if (!normalYoutubeStart.validForContent || !normalYoutubePlayback.validForContent) throw new Error("通常のYouTube再生を同期できません");
+
 console.log(`OK: ${htmlIds.length}個のUI要素を検証`);
 console.log("OK: 画像・動画選択、内カメ1台解析、同期、表示モード切替、同意保存、結果表示を確認");
 console.log("OK: 旧rear_blob互換、IndexedDBライブラリ、共有・削除、外部送信なしの説明を確認");
 console.log("OK: YouTube URL解析・公式プレイヤー同期・PWA共有先・Netflix除外を確認");
 console.log("OK: WebEyeTrack Worker、視線モデル重み、MITライセンスを確認");
 console.log("OK: 複数回キャリブレーションの中央値・モデル選択・座標変換を数値検証");
+console.log("OK: YouTube本編開始待機、停止中の除外、再開後の復帰、通常再生同期を検証");
