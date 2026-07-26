@@ -576,8 +576,8 @@ function updateAnalysisBadge(metrics) {
 }
 
 function renderRecordingFaceGuide(metrics) {
-  const pose = calibrationModel?.pose;
-  els.recordingFaceGuide.classList.toggle("hidden", !pose || !metrics?.faceDetected || !els.calibrationLayer.classList.contains("hidden"));
+  const pose = calibrationModel?.pose || calibrationPoseReference;
+  els.recordingFaceGuide.classList.toggle("hidden", !pose || !metrics?.faceDetected);
   if (!pose || !metrics?.faceDetected) return;
   const quality = evaluatePoseQuality(metrics, pose);
   const x = clamp(50 + (pose.faceCenterX - metrics.faceCenterX) * 260, 15, 85);
@@ -585,7 +585,7 @@ function renderRecordingFaceGuide(metrics) {
   els.recordingFaceDot.style.left = `${x}%`;
   els.recordingFaceDot.style.top = `${y}%`;
   els.recordingFaceGuide.dataset.quality = quality.level;
-  els.recordingFaceStatus.textContent = quality.level === "good" ? "顔位置 OK" : quality.direction;
+  els.recordingFaceStatus.textContent = quality.level === "good" ? "正面・顔位置 OK" : quality.direction;
 }
 
 function projectScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry()) {
@@ -902,7 +902,10 @@ async function collectCalibrationTrial(point, index, total, geometry, automatic,
   while (calibrationCollect.length < requiredSamples
     && performance.now() - startedAt < CALIBRATION_POINT_TIMEOUT_MS) {
     if (calibrationPoseReference && latestMetrics?.faceDetected && !isMetricsNearPose(latestMetrics, calibrationPoseReference)) {
-      els.calibrationInstruction.textContent = "顔を最初に合わせた位置へ戻してください";
+      const poseQuality = evaluatePoseQuality(latestMetrics, calibrationPoseReference);
+      els.calibrationInstruction.textContent = `${poseQuality.direction || "顔を正面へ"}（左上の枠と点を合わせてください）`;
+    } else {
+      els.calibrationInstruction.textContent = instruction || (automatic ? "顔を正面にして点を見続けてください（自動取得）" : "顔は正面のまま、点を見てください");
     }
     els.calibrationProgress.textContent = `${index + 1} / ${total}・視線 ${Math.min(calibrationCollect.length, requiredSamples)} / ${requiredSamples}`;
     await delay(120);
