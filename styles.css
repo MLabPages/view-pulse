@@ -93,7 +93,7 @@ h1 span { color: var(--accent); }
 .recording-badge i { background: #ff3b30; animation: blink 1s infinite; }
 .analysis-badge i { background: var(--accent); }
 @keyframes blink { 50% { opacity: .2; } }
-.preview-mode-switch { position: absolute; z-index: 12; left: 50%; bottom: max(137px, calc(env(safe-area-inset-bottom) + 120px)); transform: translateX(-50%); display: flex; padding: 4px; border: 1px solid rgba(255,255,255,.35); border-radius: 999px; background: rgba(5,7,10,.82); backdrop-filter: blur(10px); white-space: nowrap; }
+.preview-mode-switch { position: relative; z-index: 12; margin: 0 auto 10px; width: fit-content; max-width: 100%; display: flex; padding: 4px; border: 1px solid rgba(255,255,255,.35); border-radius: 999px; background: rgba(5,7,10,.82); backdrop-filter: blur(10px); white-space: nowrap; }
 .preview-mode-switch button { border: 0; background: none; padding: 8px 12px; border-radius: 999px; color: #e6e8ed; font-size: 11px; }
 .preview-mode-switch button.active { background: var(--accent); color: #111; font-weight: 800; }
 .camera-bottom { position: absolute; z-index: 5; left: 0; right: 0; bottom: 0; padding: 20px 22px max(24px, env(safe-area-inset-bottom)); }
