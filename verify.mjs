@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -39,7 +39,7 @@ const requiredAppMarkers = [
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
   "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
   "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "gaze_missing_reason", "model_output_stale", "renderRecordingFaceGuide", "左上の枠と点を合わせてください",
-  'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "上下方向を十分に識別できていません", "mapped_out_of_bounds",
+  'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "方向を識別できなかったため記録を開始できません", "mapped_out_of_bounds",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -90,6 +90,7 @@ if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopol
 }
 
 if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値計算に失敗");
+if (normalizedFeature(0.75, 1, 0.5) !== 0.5 || normalizedFeature(0.75, 0.5, 1) !== 0.5) throw new Error("左右の目を同じ座標方向へ正規化できません");
 const separatedAxes = measureAxisSeparation([
   ...[0.15, 0.5, 0.85].flatMap((targetY) => [0.15, 0.5, 0.85].map((targetX) => ({ targetX, targetY, screenX: targetX, screenY: targetY }))),
 ]);

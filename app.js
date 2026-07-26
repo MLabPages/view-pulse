@@ -1,5 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -580,12 +580,11 @@ function computeFaceMetrics(result) {
   const irisL = lm[468], irisR = lm[473];
   const eyeLInner = lm[133], eyeRInner = lm[362];
   const eyeLTop = lm[159], eyeLBottom = lm[145], eyeRTop = lm[386], eyeRBottom = lm[374];
-  const ratio = (value, start, end) => (value - start) / Math.max(Math.abs(end - start), 1e-6) * Math.sign(end - start || 1);
   const irisX = irisL && irisR
-    ? (ratio(irisL.x, eyeL.x, eyeLInner.x) + ratio(irisR.x, eyeR.x, eyeRInner.x)) / 2
+    ? (normalizedFeature(irisL.x, eyeL.x, eyeLInner.x) + normalizedFeature(irisR.x, eyeR.x, eyeRInner.x)) / 2
     : NaN;
   const irisY = irisL && irisR
-    ? (ratio(irisL.y, eyeLTop.y, eyeLBottom.y) + ratio(irisR.y, eyeRTop.y, eyeRBottom.y)) / 2
+    ? (normalizedFeature(irisL.y, eyeLTop.y, eyeLBottom.y) + normalizedFeature(irisR.y, eyeRTop.y, eyeRBottom.y)) / 2
     : NaN;
   return {
     faceDetected: true, smile, furrow, browRaise, eyeOpen,
@@ -783,18 +782,21 @@ async function runCalibration() {
       const maxErrorPx = Math.max(...checks.map((point) => point.error_px));
       const meanDiagonalRatio = meanErrorPx / diagonalPx;
       const maxDiagonalRatio = maxErrorPx / diagonalPx;
-      const accepted = meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
+      const axesUsable = axisSeparation.horizontal_separated && axisSeparation.vertical_separated;
+      const accepted = axesUsable && meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
         && maxDiagonalRatio <= MAX_VALIDATION_POINT_DIAGONAL_RATIO;
       calibrationModel.validation = {
-        status: accepted ? "accepted" : "rejected",
+        status: !axesUsable ? "unusable" : accepted ? "accepted" : "rejected",
         accepted,
         points: checks,
         mean_error_px: round(meanErrorPx), max_error_px: round(maxErrorPx),
         mean_diagonal_ratio: round(meanDiagonalRatio), max_diagonal_ratio: round(maxDiagonalRatio),
       };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
-      if (!accepted) qualityMessage += "。低精度として記録できます。細かな注視点ではなく、大きな領域（AOI）の傾向として扱ってください。";
-      if (!axisSeparation.vertical_separated) qualityMessage += " 上下方向を十分に識別できていません。";
+      if (!axesUsable) {
+        const failedAxes = [!axisSeparation.horizontal_separated ? "左右" : "", !axisSeparation.vertical_separated ? "上下" : ""].filter(Boolean).join("・");
+        qualityMessage += `。${failedAxes}方向を識別できなかったため記録を開始できません。正面を保って再調整してください。`;
+      } else if (!accepted) qualityMessage += "。低精度として記録できます。細かな注視点ではなく、大きな領域（AOI）の傾向として扱ってください。";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
       calibrationModel.validation = { status: "unavailable", accepted: false, reason: validationError.message || "unknown" };
