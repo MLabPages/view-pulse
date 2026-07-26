@@ -7,11 +7,14 @@ const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
-const CALIBRATION_MIN_SAMPLES = 2;
-const CALIBRATION_POINT_TIMEOUT_MS = 10000;
+// A specialized-model frame can take several seconds on a CPU-only Worker.
+// One stable frame at each of the nine targets is more useful than failing a
+// whole calibration just because a second frame did not arrive in time.
+const CALIBRATION_MIN_SAMPLES = 1;
+const CALIBRATION_POINT_TIMEOUT_MS = 15000;
 const CALIBRATION_SPREAD_LIMIT = 0.26;
 const CALIBRATION_SAMPLE_TIMEOUT_MS = 6000;
-const CALIBRATION_FIT_TIMEOUT_MS = 25000;
+const CALIBRATION_FIT_TIMEOUT_MS = 60000;
 const SPECIALIZED_GAZE_CAPTURE_WIDTH = 640;
 const SPECIALIZED_GAZE_WORKER_URL = new URL("./vendor/webeyetrack/webeyetrack.worker.js", import.meta.url);
 const SPECIALIZED_GAZE_MODEL_URL = new URL("./web/model.json", import.meta.url);
@@ -435,7 +438,11 @@ function loadSpecializedGazeModel() {
         pendingSampleAck?.(message.message || "unknown");
       } else if (message.type === "calibrated") {
         webEyeBusy = false;
-        pendingFitAck?.(true);
+        pendingFitAck?.({
+          count: message.count || 0,
+          durationMs: message.durationMs || 0,
+          learningSteps: message.learningSteps || 0,
+        });
       } else if (message.type === "calibrateError") {
         webEyeBusy = false;
         pendingFitAck?.(message.message || "unknown");
@@ -700,10 +707,10 @@ async function runCalibration() {
     for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
       observations.push(await collectCalibrationPoint(CALIBRATION_POINTS[i], i, CALIBRATION_POINTS.length, "動画内の点を見てください", geometry, true));
     }
-    els.calibrationInstruction.textContent = "視線を学習しています…";
-    els.calibrationProgress.textContent = "学習中";
+    els.calibrationInstruction.textContent = "視線の対応関係を作成しています…";
+    els.calibrationProgress.textContent = "学習中（最大60秒）";
     const fitted = await fitSpecializedGazeCalibration();
-    if (fitted !== true) throw new Error(`視線の学習に失敗しました（${fitted}）`);
+    if (!fitted || typeof fitted !== "object") throw new Error(`視線の学習に失敗しました（${fitted}）`);
     calibrationModel = {
       engine: "webeyetrack",
       engine_version: "0.0.2",
@@ -713,6 +720,8 @@ async function runCalibration() {
       viewport: currentViewport(),
       geometry,
       observations,
+      fit_duration_ms: fitted.durationMs,
+      fit_learning_steps: fitted.learningSteps,
     };
     // Adaptation alone still leaves a systematic shrink toward the centre, so
     // measure it on a few known points and correct for it before validating.
@@ -834,10 +843,14 @@ function captureCalibrationSample(target) {
 }
 
 function fitSpecializedGazeCalibration() {
-  // One training pass over all nine targets, so slow machines pay the cost once.
+  // The original fine-tuning step requires a backward pass over nine large eye
+  // images. In a CPU Worker that often exceeds the timeout. The upstream
+  // adaptor already computes an affine mapping from the nine measured points;
+  // keep that fast, deterministic mapping and use the later five-point
+  // correction for remaining bias.
   calibrationFitting = true;
   return workerRequest(
-    { type: "fitCalibration", payload: { steps: 1 } },
+    { type: "fitCalibration", payload: { steps: 0 } },
     (finish) => { pendingFitAck = finish; },
     () => { pendingFitAck = null; calibrationFitting = false; },
     CALIBRATION_FIT_TIMEOUT_MS,
