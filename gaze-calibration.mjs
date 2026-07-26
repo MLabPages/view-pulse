@@ -10,6 +10,12 @@ export function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+export function normalizedFeature(value, edgeA, edgeB) {
+  const minimum = Math.min(edgeA, edgeB);
+  const maximum = Math.max(edgeA, edgeB);
+  return (value - minimum) / Math.max(maximum - minimum, 1e-6);
+}
+
 export function evaluatePoseQuality(metrics, pose) {
   if (!pose || !metrics?.faceDetected) {
     return { level: metrics?.faceDetected ? "good" : "unavailable", weight: metrics?.faceDetected ? 1 : 0, severity: 0, direction: "" };
