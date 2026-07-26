@@ -9,7 +9,7 @@ const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
 const SPECIALIZED_GAZE_INIT_TIMEOUT_MS = 45000;
 const CALIBRATION_REPEATS = 3;
-const CALIBRATION_MIN_SAMPLES = 2;
+const CALIBRATION_MIN_SAMPLES = 3;
 const CALIBRATION_MAX_SAMPLES = 5;
 const CALIBRATION_SETTLE_MS = 450;
 const CALIBRATION_POINT_TIMEOUT_MS = 20000;
@@ -48,7 +48,8 @@ const els = {
   captureYoutubeWrap: $("captureYoutubeWrap"),
   frontPreview: $("frontPreview"), contentTypeBadge: $("contentTypeBadge"), closeCaptureButton: $("closeCaptureButton"),
   captureHint: $("captureHint"), calibrationLayer: $("calibrationLayer"), calibrationTarget: $("calibrationTarget"), calibrationInstruction: $("calibrationInstruction"),
-  calibrationProgress: $("calibrationProgress"), calibrateButton: $("calibrateButton"),
+  calibrationProgress: $("calibrationProgress"), faceAlignmentGuide: $("faceAlignmentGuide"),
+  faceGuideDot: $("faceGuideDot"), faceGuideStatus: $("faceGuideStatus"), calibrateButton: $("calibrateButton"),
   recordingBadge: $("recordingBadge"), recordingTime: $("recordingTime"), analysisBadge: $("analysisBadge"),
   recordButton: $("recordButton"), fullscreenButton: $("fullscreenButton"),
   pipModeButton: $("pipModeButton"), hiddenModeButton: $("hiddenModeButton"),
@@ -104,6 +105,7 @@ let samples = [];
 let calibrationModel = null;
 let calibrationCollect = null;
 let calibrationCollectAfter = 0;
+let calibrationPoseReference = null;
 let recordingGeometry = null;
 let reactionRaf = 0;
 let contentResultUrl = "";
@@ -478,7 +480,9 @@ function updateSpecializedGaze(result) {
     receivedAt: performance.now(),
     modelTimestamp: result.timestamp,
   };
-  if (calibrationCollect && latestMetrics?.faceDetected && (result.timestamp ?? 0) >= calibrationCollectAfter) {
+  if (calibrationCollect && latestMetrics?.faceDetected
+    && isMetricsNearPose(latestMetrics, calibrationPoseReference)
+    && (result.timestamp ?? 0) >= calibrationCollectAfter) {
     calibrationCollect.push({
       screenX, screenY,
       yaw: latestMetrics.yaw, pitch: latestMetrics.pitch, eyeDistance: latestMetrics.eyeDistance,
@@ -556,6 +560,7 @@ function computeFaceMetrics(result) {
   return {
     faceDetected: true, smile, furrow, browRaise, eyeOpen,
     valence: smile - furrow, yaw, pitch, eyeDistance: io,
+    faceCenterX: midX, faceCenterY: midY,
     attention: Math.abs(yaw) < 0.35 && eyeOpen > 0.3 ? 1 : 0,
   };
 }
@@ -564,6 +569,7 @@ function updateAnalysisBadge(metrics) {
   const span = els.analysisBadge.querySelector("span");
   if (!metrics?.faceDetected) span.textContent = "顔を画面側へ向けてください";
   else if (!webEyeReady) span.textContent = "専用視線モデルを読込中";
+  else if (calibrationModel && !isCalibrationPoseStable(metrics)) span.textContent = "顔を調整時の位置へ戻してください";
   else span.textContent = specializedGaze ? "専用モデルで視線・表情を端末内解析" : "目を確認中";
 }
 
@@ -601,7 +607,14 @@ function isCalibrationPoseStable(metrics) {
   const pose = calibrationModel?.pose;
   if (!pose) return true;
   const distanceRatio = Math.abs(metrics.eyeDistance - pose.eyeDistance) / Math.max(pose.eyeDistance, 1e-6);
-  if (calibrationModel?.engine === "webeyetrack") return distanceRatio <= 0.35;
+  if (calibrationModel?.engine === "webeyetrack") {
+    const centerStable = !Number.isFinite(pose.faceCenterX)
+      || (Math.abs(metrics.faceCenterX - pose.faceCenterX) <= 0.1 && Math.abs(metrics.faceCenterY - pose.faceCenterY) <= 0.1);
+    return centerStable
+      && Math.abs(metrics.yaw - pose.yaw) <= 0.14
+      && Math.abs(metrics.pitch - pose.pitch) <= 0.1
+      && distanceRatio <= 0.18;
+  }
   return Math.abs(metrics.yaw - pose.yaw) <= 0.16
     && Math.abs(metrics.pitch - pose.pitch) <= 0.12
     && distanceRatio <= 0.2;
@@ -626,6 +639,7 @@ function sampleMetrics(now, metrics) {
     gaze_engine: "webeyetrack",
     gaze_quality: calibrationModel?.validation?.status || "unavailable",
     eye_distance: round(metrics?.eyeDistance),
+    face_center_x: round(metrics?.faceCenterX), face_center_y: round(metrics?.faceCenterY),
     gaze_zone: gaze ? gazeZone(gaze.x, gaze.y) : "",
     attention: metrics?.attention ?? 0,
     smile: round(metrics?.smile), brow_furrow: round(metrics?.furrow),
@@ -652,6 +666,7 @@ async function runCalibration() {
   const observations = [];
   try {
     webEyeEyesClosed = 0;
+    calibrationPoseReference = await waitForFaceAlignment();
     const automatic = usesAutomaticCalibration();
     const sequence = buildCalibrationSequence();
     for (let i = 0; i < sequence.length; i++) {
@@ -729,6 +744,9 @@ async function runCalibration() {
   } finally {
     calibrationCollect = null;
     calibrationCollectAfter = 0;
+    calibrationPoseReference = null;
+    els.faceAlignmentGuide.classList.add("hidden");
+    els.calibrationTarget.classList.remove("aligning");
     els.calibrationTarget.classList.remove("ready");
     els.calibrationTarget.disabled = true;
     els.calibrationLayer.classList.add("hidden");
@@ -741,6 +759,75 @@ async function runCalibration() {
 function usesAutomaticCalibration() {
   const iPadDesktopMode = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
   return iPadDesktopMode || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+}
+
+function isMetricsNearPose(metrics, pose) {
+  if (!pose || !metrics?.faceDetected) return !!metrics?.faceDetected;
+  const distanceRatio = Math.abs(metrics.eyeDistance - pose.eyeDistance) / Math.max(pose.eyeDistance, 1e-6);
+  return Math.abs(metrics.faceCenterX - pose.faceCenterX) <= 0.1
+    && Math.abs(metrics.faceCenterY - pose.faceCenterY) <= 0.1
+    && Math.abs(metrics.yaw - pose.yaw) <= 0.14
+    && Math.abs(metrics.pitch - pose.pitch) <= 0.1
+    && distanceRatio <= 0.18;
+}
+
+function faceGuideState(metrics) {
+  if (!metrics?.faceDetected) return { ready: false, message: "顔をカメラに映してください" };
+  const horizontal = metrics.faceCenterX - 0.5;
+  const vertical = metrics.faceCenterY - 0.42;
+  if (metrics.eyeDistance < 0.18) return { ready: false, message: "もう少しカメラへ近づいてください" };
+  if (metrics.eyeDistance > 0.36) return { ready: false, message: "もう少しカメラから離れてください" };
+  if (Math.abs(horizontal) > 0.13 || Math.abs(vertical) > 0.15) return { ready: false, message: "顔マークを枠の中央へ合わせてください" };
+  if (Math.abs(metrics.yaw) > 0.18) return { ready: false, message: "顔を正面へ向けてください" };
+  return { ready: true, message: "その位置を保ってください" };
+}
+
+function renderFaceGuide(metrics) {
+  const state = faceGuideState(metrics);
+  const x = metrics?.faceDetected ? clamp((1 - metrics.faceCenterX) * 100, 8, 92) : 50;
+  const y = metrics?.faceDetected ? clamp(metrics.faceCenterY * 100, 8, 92) : 50;
+  els.faceGuideDot.style.left = `${x}%`;
+  els.faceGuideDot.style.top = `${y}%`;
+  els.faceAlignmentGuide.classList.toggle("ready", state.ready);
+  els.faceGuideStatus.textContent = state.message;
+  return state.ready;
+}
+
+async function waitForFaceAlignment() {
+  els.faceAlignmentGuide.classList.remove("hidden");
+  els.calibrationTarget.classList.add("aligning");
+  els.calibrationInstruction.textContent = "最初に顔の位置を合わせます";
+  els.calibrationProgress.textContent = "顔位置確認";
+  let stableSince = 0;
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < 30000) {
+    const ready = renderFaceGuide(latestMetrics);
+    if (ready) {
+      if (!stableSince) stableSince = performance.now();
+      if (performance.now() - stableSince >= 800) {
+        const reference = {
+          yaw: latestMetrics.yaw, pitch: latestMetrics.pitch, eyeDistance: latestMetrics.eyeDistance,
+          faceCenterX: latestMetrics.faceCenterX, faceCenterY: latestMetrics.faceCenterY,
+        };
+        els.faceAlignmentGuide.classList.add("hidden");
+        els.calibrationTarget.classList.remove("aligning");
+        return reference;
+      }
+    } else {
+      stableSince = 0;
+    }
+    await delay(100);
+  }
+  if (latestMetrics?.faceDetected) {
+    const reference = {
+      yaw: latestMetrics.yaw, pitch: latestMetrics.pitch, eyeDistance: latestMetrics.eyeDistance,
+      faceCenterX: latestMetrics.faceCenterX, faceCenterY: latestMetrics.faceCenterY,
+    };
+    els.faceAlignmentGuide.classList.add("hidden");
+    els.calibrationTarget.classList.remove("aligning");
+    return reference;
+  }
+  throw new Error("顔の位置を確認できませんでした。枠の中央に顔を合わせてください");
 }
 
 function shuffleCalibrationPoints(points) {
@@ -765,7 +852,7 @@ function buildCalibrationSequence(repeats = CALIBRATION_REPEATS) {
 }
 
 function calibrationRequiredSamples() {
-  return webEyeBackend === "cpu" ? CALIBRATION_MIN_SAMPLES : 3;
+  return CALIBRATION_MIN_SAMPLES;
 }
 
 async function collectCalibrationTrial(point, index, total, geometry, automatic, instruction = "") {
@@ -785,6 +872,9 @@ async function collectCalibrationTrial(point, index, total, geometry, automatic,
   const startedAt = performance.now();
   while (calibrationCollect.length < requiredSamples
     && performance.now() - startedAt < CALIBRATION_POINT_TIMEOUT_MS) {
+    if (calibrationPoseReference && latestMetrics?.faceDetected && !isMetricsNearPose(latestMetrics, calibrationPoseReference)) {
+      els.calibrationInstruction.textContent = "顔を最初に合わせた位置へ戻してください";
+    }
     els.calibrationProgress.textContent = `${index + 1} / ${total}・視線 ${Math.min(calibrationCollect.length, requiredSamples)} / ${requiredSamples}`;
     await delay(120);
   }
@@ -894,6 +984,8 @@ function medianPose(observations) {
     yaw: median(observations.map((point) => point.yaw)),
     pitch: median(observations.map((point) => point.pitch)),
     eyeDistance: median(observations.map((point) => point.eyeDistance)),
+    faceCenterX: calibrationPoseReference?.faceCenterX,
+    faceCenterY: calibrationPoseReference?.faceCenterY,
   };
 }
 
