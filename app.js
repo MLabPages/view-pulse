@@ -27,6 +27,13 @@ const CALIBRATION_VALIDATION_POINTS = [
   { x: 0.32, y: 0.32 }, { x: 0.68, y: 0.32 },
   { x: 0.32, y: 0.68 }, { x: 0.68, y: 0.68 },
 ];
+// Measured after the model has been adapted, to remove any remaining
+// systematic shrink or offset before the untouched validation points run.
+const CALIBRATION_CORRECTION_POINTS = [
+  { x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 },
+  { x: 0.5, y: 0.5 },
+  { x: 0.15, y: 0.85 }, { x: 0.85, y: 0.85 },
+];
 const HEATMAP_MOMENT_WINDOW_MS = 500;
 const MAX_VALIDATION_MEAN_DIAGONAL_RATIO = 0.12;
 const MAX_VALIDATION_POINT_DIAGONAL_RATIO = 0.18;
@@ -49,6 +56,7 @@ const els = {
   recordingBadge: $("recordingBadge"), recordingTime: $("recordingTime"), analysisBadge: $("analysisBadge"),
   recordButton: $("recordButton"), fullscreenButton: $("fullscreenButton"),
   pipModeButton: $("pipModeButton"), hiddenModeButton: $("hiddenModeButton"),
+  previewModeSwitch: $("previewModeSwitch"),
   newCaptureButton: $("newCaptureButton"), resultSummary: $("resultSummary"),
   reactionTab: $("reactionTab"), viewPanel: $("viewPanel"), reactionPanel: $("reactionPanel"),
   resultContentImage: $("resultContentImage"), resultContentVideo: $("resultContentVideo"), resultFrontVideo: $("resultFrontVideo"),
@@ -576,12 +584,54 @@ function updateAnalysisBadge(metrics) {
   else span.textContent = specializedGaze ? "専用モデルで視線・表情を端末内解析" : "目を確認中";
 }
 
-function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry()) {
+function projectScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry()) {
   if (!geometry?.media || !Number.isFinite(screenX) || !Number.isFinite(screenY)) return null;
   const captureRect = els.captureScreen.getBoundingClientRect();
-  const x = (screenX * window.innerWidth - captureRect.left - geometry.media.x) / geometry.media.width;
-  const y = (screenY * window.innerHeight - captureRect.top - geometry.media.y) / geometry.media.height;
-  return { x: clamp(x, 0, 1), y: clamp(y, 0, 1) };
+  // Unclamped on purpose: clamping here would hide the shrink-to-centre bias
+  // that the correction step needs to measure.
+  return {
+    x: (screenX * window.innerWidth - captureRect.left - geometry.media.x) / geometry.media.width,
+    y: (screenY * window.innerHeight - captureRect.top - geometry.media.y) / geometry.media.height,
+  };
+}
+
+function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometry(), options = {}) {
+  const raw = projectScreenGazeToMedia(screenX, screenY, geometry);
+  if (!raw) return null;
+  const correction = "correction" in options ? options.correction : calibrationModel?.correction;
+  const corrected = applyGazeCorrection(raw, correction);
+  return { x: clamp(corrected.x, 0, 1), y: clamp(corrected.y, 0, 1) };
+}
+
+function applyGazeCorrection(point, correction) {
+  if (!correction) return point;
+  return {
+    x: correction.x.scale * point.x + correction.x.offset,
+    y: correction.y.scale * point.y + correction.y.offset,
+  };
+}
+
+function fitGazeCorrection(samples) {
+  return {
+    x: fitCorrectionAxis(samples.map((s) => s.x), samples.map((s) => s.targetX)),
+    y: fitCorrectionAxis(samples.map((s) => s.y), samples.map((s) => s.targetY)),
+    points: samples.map((s) => ({ x: round(s.x), y: round(s.y), target_x: s.targetX, target_y: s.targetY })),
+  };
+}
+
+function fitCorrectionAxis(values, targets) {
+  const count = values.length;
+  const meanValue = values.reduce((sum, value) => sum + value, 0) / count;
+  const meanTarget = targets.reduce((sum, value) => sum + value, 0) / count;
+  const variance = values.reduce((sum, value) => sum + (value - meanValue) ** 2, 0);
+  const covariance = values.reduce((sum, value, index) => sum + (value - meanValue) * (targets[index] - meanTarget), 0);
+  const slope = variance > 1e-4 ? covariance / variance : 0;
+  // Fall back to a shift-only correction when the samples are too noisy to
+  // trust a scale factor.
+  if (!Number.isFinite(slope) || slope < 0.2 || slope > 8) {
+    return { scale: 1, offset: meanTarget - meanValue, mode: "offset" };
+  }
+  return { scale: slope, offset: meanTarget - slope * meanValue, mode: "linear" };
 }
 
 function mapGaze(metrics = null, { skipPoseCheck = false } = {}) {
@@ -641,6 +691,8 @@ async function runCalibration() {
   els.calibrateButton.disabled = true;
   els.recordButton.disabled = true;
   els.calibrationLayer.classList.remove("hidden");
+  // Hide the preview switch so it cannot overlap the calibration guidance.
+  els.previewModeSwitch.classList.add("hidden");
   const observations = [];
   try {
     webEyeEyesClosed = 0;
@@ -662,6 +714,17 @@ async function runCalibration() {
       geometry,
       observations,
     };
+    // Adaptation alone still leaves a systematic shrink toward the centre, so
+    // measure it on a few known points and correct for it before validating.
+    const correctionSamples = [];
+    for (let i = 0; i < CALIBRATION_CORRECTION_POINTS.length; i++) {
+      const point = CALIBRATION_CORRECTION_POINTS[i];
+      const observed = await collectCalibrationPoint(point, i, CALIBRATION_CORRECTION_POINTS.length, "もう一度、点を見てください", geometry, false);
+      const projected = projectScreenGazeToMedia(observed.screenX, observed.screenY, geometry);
+      if (!projected) throw new Error("視線座標を動画上に変換できませんでした");
+      correctionSamples.push({ ...projected, targetX: point.x, targetY: point.y });
+    }
+    calibrationModel.correction = fitGazeCorrection(correctionSamples);
     let qualityMessage = "視線調整が完了しました";
     try {
       const validations = [];
@@ -709,6 +772,7 @@ async function runCalibration() {
   } finally {
     calibrationCollect = null;
     els.calibrationLayer.classList.add("hidden");
+    els.previewModeSwitch.classList.remove("hidden");
     els.calibrateButton.disabled = false;
     if (!recording) els.recordButton.disabled = calibrationModel?.validation?.accepted !== true;
   }
