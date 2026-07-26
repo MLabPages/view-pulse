@@ -65,6 +65,7 @@ const els = {
   resultYoutubeWrap: $("resultYoutubeWrap"), youtubeReactionNote: $("youtubeReactionNote"),
   viewStage: $("viewStage"), heatmapCanvas: $("heatmapCanvas"), heatmapMode: $("heatmapMode"),
   analysisMode: $("analysisMode"), segmentSeconds: $("segmentSeconds"), segmentPanel: $("segmentPanel"), segmentGrid: $("segmentGrid"), segmentDetail: $("segmentDetail"),
+  segmentSourcePreview: $("segmentSourcePreview"), segmentYoutubeThumbnail: $("segmentYoutubeThumbnail"),
   aoiPanel: $("aoiPanel"), aoiOverlay: $("aoiOverlay"), aoiList: $("aoiList"), aoiHelp: $("aoiHelp"),
   timelineCanvas: $("timelineCanvas"), timelineHelp: $("timelineHelp"), metricTracked: $("metricTracked"),
   metricPositive: $("metricPositive"), metricZone: $("metricZone"),
@@ -1383,10 +1384,10 @@ async function createContentThumbnail() {
   return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.76));
 }
 
-function youtubeThumbnailUrl(videoId) {
+function youtubeThumbnailUrl(videoId, variant = "hqdefault") {
   const safeId = String(videoId || "").trim();
   if (!/^[A-Za-z0-9_-]{6,}$/.test(safeId)) return "";
-  return `https://i.ytimg.com/vi/${encodeURIComponent(safeId)}/hqdefault.jpg`;
+  return `https://i.ytimg.com/vi/${encodeURIComponent(safeId)}/${variant}.jpg`;
 }
 
 function newCaptureId() {
@@ -1708,7 +1709,7 @@ function drawHeatmap() {
   ctx.globalCompositeOperation = "source-over";
 }
 
-function drawHeatmapOn(canvas, segmentRows, source) {
+function drawHeatmapOn(canvas, segmentRows, source, { showGrid = false } = {}) {
   const ctx = canvas.getContext("2d");
   const rect = canvas.getBoundingClientRect();
   const dpr = Math.min(devicePixelRatio || 1, 2);
@@ -1716,6 +1717,14 @@ function drawHeatmapOn(canvas, segmentRows, source) {
   canvas.height = Math.max(1, Math.round(rect.height * dpr));
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const mediaRect = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+  if (showGrid) {
+    ctx.strokeStyle = "rgba(255,255,255,.12)";
+    ctx.lineWidth = Math.max(1, dpr);
+    for (let i = 1; i < 3; i++) {
+      ctx.beginPath(); ctx.moveTo(mediaRect.width * i / 3, 0); ctx.lineTo(mediaRect.width * i / 3, mediaRect.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, mediaRect.height * i / 3); ctx.lineTo(mediaRect.width, mediaRect.height * i / 3); ctx.stroke();
+    }
+  }
   ctx.globalCompositeOperation = "lighter";
   for (const sample of segmentRows.filter((row) => row.gaze_valid_for_content !== 0 && row.gaze_x !== "")) {
     const x = mediaRect.x + number(sample.gaze_x) * mediaRect.width;
@@ -1731,30 +1740,52 @@ function drawHeatmapOn(canvas, segmentRows, source) {
 function formatRange(segment) { return `${Math.round(segment.start_ms / 1000)}～${Math.round(segment.end_ms / 1000)}秒`; }
 
 async function renderSegmentHeatmaps() {
-  if (contentKind !== "video") return;
+  if (!["video", "youtube"].includes(contentKind)) return;
+  const isYoutube = contentKind === "youtube";
   const segments = segmentSamples(samples, heatmapSegmentSeconds, contentDurationMs);
   els.segmentGrid.replaceChildren();
-  els.segmentDetail.textContent = activeHeatmapSegment ? `${formatRange(activeHeatmapSegment)} を大きく表示中` : "コマを選ぶと、その時間帯だけのヒートマップを表示します";
-  const frameSource = document.createElement("video");
-  frameSource.src = contentResultUrl;
-  frameSource.muted = true; frameSource.playsInline = true;
-  await new Promise((resolve) => { frameSource.addEventListener("loadedmetadata", resolve, { once: true }); setTimeout(resolve, 1200); });
+  els.segmentDetail.textContent = activeHeatmapSegment ? `${formatRange(activeHeatmapSegment)} を大きく表示中` : isYoutube
+    ? "YouTube動画では映像フレームを表示せず、時間帯別の注目分布だけを表示します。"
+    : "コマを選ぶと、その時間帯だけのヒートマップを表示します";
+  els.segmentSourcePreview.classList.toggle("hidden", !isYoutube);
+  if (isYoutube) {
+    els.segmentYoutubeThumbnail.src = youtubeThumbnailUrl(youtubeVideoId, "maxresdefault");
+    els.segmentYoutubeThumbnail.onerror = () => {
+      els.segmentYoutubeThumbnail.onerror = null;
+      els.segmentYoutubeThumbnail.src = youtubeThumbnailUrl(youtubeVideoId, "hqdefault");
+    };
+  }
+  const frameSource = isYoutube ? null : document.createElement("video");
+  if (frameSource) {
+    frameSource.src = contentResultUrl;
+    frameSource.muted = true; frameSource.playsInline = true;
+    await new Promise((resolve) => { frameSource.addEventListener("loadedmetadata", resolve, { once: true }); setTimeout(resolve, 1200); });
+  }
   for (const segment of segments) {
     const card = document.createElement("button"); card.type = "button"; card.className = "segment-card";
     if (activeHeatmapSegment?.start_ms === segment.start_ms) card.classList.add("active");
     const frame = document.createElement("div"); frame.className = "segment-frame";
     const image = document.createElement("img"); image.alt = `${formatRange(segment)}の代表フレーム`;
     const canvas = document.createElement("canvas"); frame.append(image, canvas);
+    if (isYoutube) {
+      image.remove();
+      const unavailable = document.createElement("small"); unavailable.className = "segment-frame-note"; unavailable.textContent = "映像フレームは表示できません"; frame.append(unavailable);
+    }
     const range = document.createElement("small"); range.textContent = formatRange(segment);
     const count = document.createElement("strong"); count.textContent = `有効視線 ${segment.valid_gaze_samples}件`;
     card.append(frame, range, count);
     card.addEventListener("click", () => {
       activeHeatmapSegment = segment;
       els.heatmapMode.value = "overall";
-      els.resultContentVideo.currentTime = (segment.start_ms + segment.end_ms) / 2000;
+      if (contentKind === "video") els.resultContentVideo.currentTime = (segment.start_ms + segment.end_ms) / 2000;
+      else youtubeResultPlayer?.seekTo?.((segment.start_ms + segment.end_ms) / 2000, true);
       drawHeatmap(); renderSegmentHeatmaps();
     });
     els.segmentGrid.append(card);
+    if (isYoutube) {
+      requestAnimationFrame(() => drawHeatmapOn(canvas, segment.samples, null, { showGrid: true }));
+      continue;
+    }
     try {
       frameSource.currentTime = Math.min((segment.start_ms + segment.end_ms) / 2000, Math.max(0, (frameSource.duration || 0) - .05));
       await new Promise((resolve) => { frameSource.addEventListener("seeked", resolve, { once: true }); setTimeout(resolve, 800); });
