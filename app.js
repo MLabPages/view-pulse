@@ -1,5 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -93,6 +93,7 @@ let webEyeContext = null;
 let specializedGaze = null;
 let webEyeLastStepError = "";
 let webEyeBackend = "";
+let gazeEngine = "webeyetrack";
 let webEyeEyesClosed = 0;
 let analysisRunning = false;
 let analysisRaf = 0;
@@ -323,7 +324,8 @@ async function prepareCapture() {
     await loadFaceModel();
     await loadSpecializedGazeModel();
     startAnalysisLoop();
-    els.analysisBadge.querySelector("span").textContent = "専用モデルで視線・表情を端末内解析";
+    els.analysisBadge.querySelector("span").textContent = gazeEngine === "mediapipe-iris"
+      ? "CPU向け高速虹彩推定で端末内解析" : "専用モデルで視線・表情を端末内解析";
     calibrationModel = null;
     recordingGeometry = null;
     els.recordButton.disabled = true;
@@ -413,6 +415,7 @@ function loadSpecializedGazeModel() {
       if (message.type === "ready") {
         webEyeReady = true;
         webEyeBackend = message.backend || "";
+        gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack";
         finish(resolve);
       } else if (message.type === "initError") {
         webEyeReady = false;
@@ -458,8 +461,22 @@ function stopSpecializedGazeModel() {
   webEyeCanvas = null;
   webEyeContext = null;
   webEyeBackend = "";
+  gazeEngine = "webeyetrack";
   webEyeEyesClosed = 0;
   calibrationCollectAfter = 0;
+}
+
+function updateMediaPipeGaze(now, metrics) {
+  if (gazeEngine !== "mediapipe-iris" || !metrics?.faceDetected
+    || !Number.isFinite(metrics.irisX) || !Number.isFinite(metrics.irisY)) return;
+  specializedGaze = { screenX: metrics.irisX, screenY: metrics.irisY, receivedAt: now, modelTimestamp: now };
+  if (calibrationCollect && isMetricsNearPose(metrics, calibrationPoseReference) && now >= calibrationCollectAfter) {
+    calibrationCollect.push({
+      screenX: metrics.irisX, screenY: metrics.irisY,
+      yaw: metrics.yaw, pitch: metrics.pitch, eyeDistance: metrics.eyeDistance,
+      modelTimestamp: now, receivedAt: now,
+    });
+  }
 }
 
 function updateSpecializedGaze(result) {
@@ -493,6 +510,7 @@ function updateSpecializedGaze(result) {
 }
 
 function requestSpecializedGaze(now) {
+  if (gazeEngine === "mediapipe-iris") return;
   if (!webEyeReady || webEyeBusy || !webEyeWorker || els.frontPreview.readyState < 2) return;
   if (now - webEyeLastAt < SPECIALIZED_GAZE_INTERVAL_MS) return;
   webEyeLastAt = now;
@@ -528,6 +546,7 @@ function startAnalysisLoop() {
     try {
       const result = faceLandmarker.detectForVideo(els.frontPreview, now);
       latestMetrics = computeFaceMetrics(result);
+      updateMediaPipeGaze(now, latestMetrics);
       requestSpecializedGaze(now);
       updateAnalysisBadge(latestMetrics);
       if (recording) sampleMetrics(now, latestMetrics);
@@ -558,10 +577,21 @@ function computeFaceMetrics(result) {
   const io = Math.max(Math.hypot(eyeR.x - eyeL.x, eyeR.y - eyeL.y), 1e-6);
   const yaw = (nose.x - midX) / io;
   const pitch = (nose.y - midY) / io;
+  const irisL = lm[468], irisR = lm[473];
+  const eyeLInner = lm[133], eyeRInner = lm[362];
+  const eyeLTop = lm[159], eyeLBottom = lm[145], eyeRTop = lm[386], eyeRBottom = lm[374];
+  const ratio = (value, start, end) => (value - start) / Math.max(Math.abs(end - start), 1e-6) * Math.sign(end - start || 1);
+  const irisX = irisL && irisR
+    ? (ratio(irisL.x, eyeL.x, eyeLInner.x) + ratio(irisR.x, eyeR.x, eyeRInner.x)) / 2
+    : NaN;
+  const irisY = irisL && irisR
+    ? (ratio(irisL.y, eyeLTop.y, eyeLBottom.y) + ratio(irisR.y, eyeRTop.y, eyeRBottom.y)) / 2
+    : NaN;
   return {
     faceDetected: true, smile, furrow, browRaise, eyeOpen,
     valence: smile - furrow, yaw, pitch, eyeDistance: io,
     faceCenterX: midX, faceCenterY: midY,
+    irisX, irisY,
     attention: Math.abs(yaw) < 0.35 && eyeOpen > 0.3 ? 1 : 0,
   };
 }
@@ -572,7 +602,9 @@ function updateAnalysisBadge(metrics) {
   if (!metrics?.faceDetected) span.textContent = "顔を画面側へ向けてください";
   else if (!webEyeReady) span.textContent = "専用視線モデルを読込中";
   else if (calibrationModel && evaluatePoseQuality(metrics, calibrationModel.pose).level === "excluded") span.textContent = "顔位置が大きく変わり視線を一時保留中";
-  else span.textContent = specializedGaze ? "専用モデルで視線・表情を端末内解析" : "目を確認中";
+  else span.textContent = specializedGaze
+    ? (gazeEngine === "mediapipe-iris" ? "CPU向け高速虹彩推定で端末内解析" : "専用モデルで視線・表情を端末内解析")
+    : "目を確認中";
 }
 
 function renderRecordingFaceGuide(metrics) {
@@ -603,20 +635,21 @@ function mapScreenGazeToMedia(screenX, screenY, geometry = currentCaptureGeometr
   const directMapping = "directMapping" in options ? options.directMapping : calibrationModel?.direct_mapping;
   if (["affine2d", "quadratic2d"].includes(directMapping?.mode)) {
     const mapped = applyDirectGazeMapping(screenX, screenY, directMapping);
-    return mapped ? { x: clamp(mapped.x, 0, 1), y: clamp(mapped.y, 0, 1) } : null;
+    return mapped;
   }
   const raw = projectScreenGazeToMedia(screenX, screenY, geometry);
   if (!raw) return null;
-  return { x: clamp(raw.x, 0, 1), y: clamp(raw.y, 0, 1) };
+  return raw;
 }
 
 function mapGaze(metrics = null, { skipPoseCheck = false } = {}) {
-  if (!calibrationModel || calibrationModel.engine !== "webeyetrack" || !specializedGaze) return null;
+  if (!calibrationModel || !["webeyetrack", "mediapipe-iris"].includes(calibrationModel.engine) || !specializedGaze) return null;
   if (performance.now() - specializedGaze.receivedAt > SPECIALIZED_GAZE_MAX_AGE_MS) return null;
   const poseQuality = !skipPoseCheck && metrics ? evaluatePoseQuality(metrics, calibrationModel.pose) : { level: "good", weight: 1, severity: 0 };
   if (poseQuality.level === "excluded") return null;
   const mapped = mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY);
-  return mapped ? { ...mapped, calibrated: true, poseQuality } : null;
+  if (!mapped || mapped.x < 0 || mapped.x > 1 || mapped.y < 0 || mapped.y > 1) return null;
+  return { ...mapped, calibrated: true, poseQuality };
 }
 
 function isCalibrationPoseStable(metrics) {
@@ -647,11 +680,14 @@ function sampleMetrics(now, metrics) {
   const poseQuality = metrics?.faceDetected && calibrationModel?.pose
     ? evaluatePoseQuality(metrics, calibrationModel.pose)
     : { level: "unavailable", weight: 0, severity: 0 };
+  const rawMapped = specializedGaze ? mapScreenGazeToMedia(specializedGaze.screenX, specializedGaze.screenY) : null;
+  const mappedOutOfBounds = rawMapped && (rawMapped.x < 0 || rawMapped.x > 1 || rawMapped.y < 0 || rawMapped.y > 1);
   const gazeMissingReason = gaze ? ""
     : !metrics?.faceDetected ? "face_not_detected"
       : poseQuality.level === "excluded" ? "pose_excluded"
         : !specializedGaze ? "model_no_output"
           : performance.now() - specializedGaze.receivedAt > SPECIALIZED_GAZE_MAX_AGE_MS ? "model_output_stale"
+            : mappedOutOfBounds ? "mapped_out_of_bounds"
             : "mapping_failed";
   samples.push({
     elapsed_ms: Math.max(0, Math.round(now - recordStart)),
@@ -665,7 +701,9 @@ function sampleMetrics(now, metrics) {
     gaze_weight: round(gaze?.poseQuality?.weight ?? 0),
     gaze_pose_deviation: round(poseQuality.severity),
     raw_gaze_x: round(specializedGaze?.screenX), raw_gaze_y: round(specializedGaze?.screenY),
-    gaze_engine: "webeyetrack",
+    gaze_engine: gazeEngine,
+    raw_gaze_timestamp_ms: round(specializedGaze?.modelTimestamp),
+    raw_gaze_age_ms: round(specializedGaze ? performance.now() - specializedGaze.receivedAt : NaN),
     gaze_quality: calibrationModel?.validation?.status || "unavailable",
     eye_distance: round(metrics?.eyeDistance),
     face_center_x: round(metrics?.faceCenterX), face_center_y: round(metrics?.faceCenterY),
@@ -703,11 +741,12 @@ async function runCalibration() {
       observations.push(await collectCalibrationTrial(item, i, sequence.length, geometry, automatic));
     }
     const representatives = summarizeCalibrationPoints(observations);
+    const axisSeparation = measureAxisSeparation(representatives);
     const directMapping = selectDirectGazeMapping(representatives);
     if (!directMapping) throw new Error("9点の視線座標から変換を作成できませんでした");
     calibrationModel = {
-      engine: "webeyetrack",
-      engine_version: "0.0.2",
+      engine: gazeEngine,
+      engine_version: gazeEngine === "webeyetrack" ? "0.0.2" : "mediapipe-face-landmarker-iris",
       backend: webEyeBackend,
       method: "randomized-three-pass-nine-point-direct-mapping",
       calibration_points: CALIBRATION_POINTS.length,
@@ -720,6 +759,7 @@ async function runCalibration() {
       geometry,
       observations,
       representative_points: representatives,
+      axis_separation: axisSeparation,
       direct_mapping: directMapping,
     };
     calibrationModel.training_points = buildCalibrationChecks(representatives, geometry);
@@ -754,6 +794,7 @@ async function runCalibration() {
       };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
       if (!accepted) qualityMessage += "。低精度として記録できます。細かな注視点ではなく、大きな領域（AOI）の傾向として扱ってください。";
+      if (!axisSeparation.vertical_separated) qualityMessage += " 上下方向を十分に識別できていません。";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
       calibrationModel.validation = { status: "unavailable", accepted: false, reason: validationError.message || "unknown" };

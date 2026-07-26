@@ -137,6 +137,26 @@ export function selectDirectGazeMapping(points) {
   };
 }
 
+export function measureAxisSeparation(points) {
+  const groupedMeans = (targetKey, valueKey) => [0.15, 0.5, 0.85].map((target) => {
+    const values = points.filter((point) => point[targetKey] === target).map((point) => point[valueKey]);
+    return median(values);
+  });
+  const horizontalMeans = groupedMeans("targetX", "screenX");
+  const verticalMeans = groupedMeans("targetY", "screenY");
+  const minimumGap = (values) => Math.min(Math.abs(values[1] - values[0]), Math.abs(values[2] - values[1]));
+  const horizontalGap = minimumGap(horizontalMeans);
+  const verticalGap = minimumGap(verticalMeans);
+  return {
+    horizontal_means: horizontalMeans,
+    vertical_means: verticalMeans,
+    horizontal_minimum_gap: horizontalGap,
+    vertical_minimum_gap: verticalGap,
+    horizontal_separated: Number.isFinite(horizontalGap) && horizontalGap >= 0.025,
+    vertical_separated: Number.isFinite(verticalGap) && verticalGap >= 0.025,
+  };
+}
+
 function solveLinearSystem(matrix, vector) {
   const rows = matrix.map((row, index) => [...row, vector[index]]);
   const size = matrix.length;
