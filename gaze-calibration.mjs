@@ -16,6 +16,17 @@ export function normalizedFeature(value, edgeA, edgeB) {
   return (value - minimum) / Math.max(maximum - minimum, 1e-6);
 }
 
+export function signedPerpendicularFeature(point, edgeA, edgeB) {
+  if (!point || !edgeA || !edgeB) return NaN;
+  const [start, end] = edgeA.x <= edgeB.x ? [edgeA, edgeB] : [edgeB, edgeA];
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const widthSquared = dx * dx + dy * dy;
+  if (widthSquared < 1e-12) return NaN;
+  // Signed perpendicular distance from the eye axis, normalized by eye width.
+  return (dx * (point.y - start.y) - dy * (point.x - start.x)) / widthSquared;
+}
+
 export function evaluatePoseQuality(metrics, pose) {
   if (!pose || !metrics?.faceDetected) {
     return { level: metrics?.faceDetected ? "good" : "unavailable", weight: metrics?.faceDetected ? 1 : 0, severity: 0, direction: "" };
@@ -143,23 +154,75 @@ export function selectDirectGazeMapping(points) {
   };
 }
 
-export function measureAxisSeparation(points) {
-  const groupedMeans = (targetKey, valueKey) => [0.15, 0.5, 0.85].map((target) => {
-    const values = points.filter((point) => point[targetKey] === target).map((point) => point[valueKey]);
-    return median(values);
-  });
-  const horizontalMeans = groupedMeans("targetX", "screenX");
-  const verticalMeans = groupedMeans("targetY", "screenY");
-  const minimumGap = (values) => Math.min(Math.abs(values[1] - values[0]), Math.abs(values[2] - values[1]));
-  const horizontalGap = minimumGap(horizontalMeans);
-  const verticalGap = minimumGap(verticalMeans);
+export function measureAxisSeparation(observations) {
+  const levels = [0.15, 0.5, 0.85];
+  const deviation = (values) => {
+    const center = median(values);
+    const mad = median(values.map((value) => Math.abs(value - center)));
+    const mean = values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+    const standardDeviation = Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / Math.max(values.length, 1));
+    return { representative: center, mad, standard_deviation: standardDeviation };
+  };
+  const diagnose = (targetKey, orthogonalKey, valueKey) => {
+    const pointStatistics = levels.flatMap((target) => levels.map((orthogonal) => {
+      const values = observations
+        .filter((point) => point[targetKey] === target && point[orthogonalKey] === orthogonal)
+        .map((point) => point[valueKey])
+        .filter(Number.isFinite);
+      return { target, orthogonal_target: orthogonal, samples: values.length, ...deviation(values) };
+    }));
+    const levelStatistics = levels.map((target) => {
+      const points = pointStatistics.filter((point) => point.target === target);
+      return {
+        target,
+        representative: median(points.map((point) => point.representative)),
+        mad: median(points.map((point) => point.mad)),
+        standard_deviation: median(points.map((point) => point.standard_deviation)),
+      };
+    });
+    const adjacentDifferences = [
+      levelStatistics[1].representative - levelStatistics[0].representative,
+      levelStatistics[2].representative - levelStatistics[1].representative,
+    ];
+    const direction = Math.sign(levelStatistics[2].representative - levelStatistics[0].representative);
+    const levelMonotonic = direction !== 0 && adjacentDifferences.every((difference) => Math.sign(difference) === direction);
+    const consistentPointOrders = levels.filter((orthogonal) => {
+      const values = levels.map((target) => pointStatistics.find((point) => point.target === target && point.orthogonal_target === orthogonal)?.representative);
+      return values.every(Number.isFinite) && direction !== 0
+        && Math.sign(values[1] - values[0]) === direction
+        && Math.sign(values[2] - values[1]) === direction;
+    }).length;
+    const pointOrderConsistency = consistentPointOrders / levels.length;
+    const pointOrderConsistent = consistentPointOrders >= 2;
+    const signalToNoiseRatios = adjacentDifferences.map((difference, index) => {
+      const noise = Math.max(Math.hypot(levelStatistics[index].mad, levelStatistics[index + 1].mad), 1e-6);
+      return Math.abs(difference) / noise;
+    });
+    const monotonic = levelMonotonic && pointOrderConsistent;
+    return {
+      level_statistics: levelStatistics,
+      point_statistics: pointStatistics,
+      adjacent_differences: adjacentDifferences,
+      difference_to_mad_ratios: signalToNoiseRatios,
+      direction: direction > 0 ? "increasing" : direction < 0 ? "decreasing" : "flat",
+      level_monotonic: levelMonotonic,
+      point_order_consistent: pointOrderConsistent,
+      point_order_consistency: pointOrderConsistency,
+      monotonic,
+      separated: monotonic && Math.min(...signalToNoiseRatios) >= 1.5,
+    };
+  };
+  const horizontal = diagnose("targetX", "targetY", "screenX");
+  const vertical = diagnose("targetY", "targetX", "screenY");
   return {
-    horizontal_means: horizontalMeans,
-    vertical_means: verticalMeans,
-    horizontal_minimum_gap: horizontalGap,
-    vertical_minimum_gap: verticalGap,
-    horizontal_separated: Number.isFinite(horizontalGap) && horizontalGap >= 0.025,
-    vertical_separated: Number.isFinite(verticalGap) && verticalGap >= 0.025,
+    horizontal,
+    vertical,
+    horizontal_means: horizontal.level_statistics.map((item) => item.representative),
+    vertical_means: vertical.level_statistics.map((item) => item.representative),
+    horizontal_adjacent_differences: horizontal.adjacent_differences,
+    vertical_adjacent_differences: vertical.adjacent_differences,
+    horizontal_separated: horizontal.separated,
+    vertical_separated: vertical.separated,
   };
 }
 

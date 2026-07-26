@@ -1,5 +1,5 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -579,12 +579,11 @@ function computeFaceMetrics(result) {
   const pitch = (nose.y - midY) / io;
   const irisL = lm[468], irisR = lm[473];
   const eyeLInner = lm[133], eyeRInner = lm[362];
-  const eyeLTop = lm[159], eyeLBottom = lm[145], eyeRTop = lm[386], eyeRBottom = lm[374];
   const irisX = irisL && irisR
     ? (normalizedFeature(irisL.x, eyeL.x, eyeLInner.x) + normalizedFeature(irisR.x, eyeR.x, eyeRInner.x)) / 2
     : NaN;
   const irisY = irisL && irisR
-    ? (normalizedFeature(irisL.y, eyeLTop.y, eyeLBottom.y) + normalizedFeature(irisR.y, eyeRTop.y, eyeRBottom.y)) / 2
+    ? (signedPerpendicularFeature(irisL, eyeL, eyeLInner) + signedPerpendicularFeature(irisR, eyeR, eyeRInner)) / 2
     : NaN;
   return {
     faceDetected: true, smile, furrow, browRaise, eyeOpen,
@@ -740,7 +739,7 @@ async function runCalibration() {
       observations.push(await collectCalibrationTrial(item, i, sequence.length, geometry, automatic));
     }
     const representatives = summarizeCalibrationPoints(observations);
-    const axisSeparation = measureAxisSeparation(representatives);
+    const axisSeparation = measureAxisSeparation(observations);
     const directMapping = selectDirectGazeMapping(representatives);
     if (!directMapping) throw new Error("9点の視線座標から変換を作成できませんでした");
     calibrationModel = {
@@ -782,25 +781,35 @@ async function runCalibration() {
       const maxErrorPx = Math.max(...checks.map((point) => point.error_px));
       const meanDiagonalRatio = meanErrorPx / diagonalPx;
       const maxDiagonalRatio = maxErrorPx / diagonalPx;
-      const axesUsable = axisSeparation.horizontal_separated && axisSeparation.vertical_separated;
+      const verticalOrderConsistent = axisSeparation.vertical.monotonic;
+      const axesStronglySeparated = axisSeparation.horizontal_separated && axisSeparation.vertical_separated;
       // Held-out confirmation points are the primary accuracy test. Axis separation is
       // a diagnostic, because small but consistent iris motion can still map accurately.
-      const accepted = meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
+      const validationAccuracyAccepted = meanDiagonalRatio <= MAX_VALIDATION_MEAN_DIAGONAL_RATIO
         && maxDiagonalRatio <= MAX_VALIDATION_POINT_DIAGONAL_RATIO;
+      const accepted = validationAccuracyAccepted && verticalOrderConsistent;
+      const verticalErrors = checks.map((point) => ({
+        target_x: point.targetX, target_y: point.targetY,
+        predicted_y: point.predictedY, error_y: point.error_y,
+        absolute_error_px: round(Math.abs(point.error_y) * geometry.media.height),
+      }));
       calibrationModel.validation = {
-        status: accepted ? "accepted" : !axesUsable ? "unusable" : "rejected",
+        status: accepted ? "accepted" : !verticalOrderConsistent ? "unusable" : "rejected",
         accepted,
         points: checks,
         mean_error_px: round(meanErrorPx), max_error_px: round(maxErrorPx),
         mean_diagonal_ratio: round(meanDiagonalRatio), max_diagonal_ratio: round(maxDiagonalRatio),
+        vertical_error: {
+          points: verticalErrors,
+          mean_absolute_px: round(verticalErrors.reduce((sum, point) => sum + point.absolute_error_px, 0) / verticalErrors.length),
+          max_absolute_px: round(Math.max(...verticalErrors.map((point) => point.absolute_error_px))),
+        },
       };
       qualityMessage += `（確認時の平均ずれ ${Math.round(meanErrorPx)}px）`;
-      if (accepted && !axesUsable) {
-        const weakAxes = [!axisSeparation.horizontal_separated ? "左右" : "", !axisSeparation.vertical_separated ? "上下" : ""].filter(Boolean).join("・");
-        qualityMessage += `。${weakAxes}方向の生特徴の差は小さいものの、確認点の精度基準を満たしたため記録できます。`;
-      } else if (!axesUsable) {
-        const failedAxes = [!axisSeparation.horizontal_separated ? "左右" : "", !axisSeparation.vertical_separated ? "上下" : ""].filter(Boolean).join("・");
-        qualityMessage += `。${failedAxes}方向を識別できなかったため記録を開始できません。正面を保って再調整してください。`;
+      if (accepted && !axesStronglySeparated) {
+        qualityMessage += "。点間差は小さいものの、3段階の順序と確認点の精度基準を満たしたため記録できます。";
+      } else if (!verticalOrderConsistent) {
+        qualityMessage += "。上・中央・下の順序が一貫しなかったため記録を開始できません。正面を保って再調整してください。";
       } else if (!accepted) qualityMessage += "。低精度として記録できます。細かな注視点ではなく、大きな領域（AOI）の傾向として扱ってください。";
     } catch (validationError) {
       console.warn("Calibration validation skipped", validationError);
