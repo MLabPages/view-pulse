@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -39,8 +39,8 @@ const requiredAppMarkers = [
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
   "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
   "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "gaze_missing_reason", "model_output_stale", "renderRecordingFaceGuide", "左上の枠と点を合わせてください",
-  'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "方向を識別できなかったため記録を開始できません", "mapped_out_of_bounds",
-  "確認点の精度基準を満たしたため記録できます",
+  'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "順序が一貫しなかったため記録を開始できません", "mapped_out_of_bounds",
+  "3段階の順序と確認点の精度基準を満たしたため記録できます", "vertical_error", "verticalOrderConsistent",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -92,10 +92,21 @@ if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopol
 
 if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値計算に失敗");
 if (normalizedFeature(0.75, 1, 0.5) !== 0.5 || normalizedFeature(0.75, 0.5, 1) !== 0.5) throw new Error("左右の目を同じ座標方向へ正規化できません");
-const separatedAxes = measureAxisSeparation([
-  ...[0.15, 0.5, 0.85].flatMap((targetY) => [0.15, 0.5, 0.85].map((targetX) => ({ targetX, targetY, screenX: targetX, screenY: targetY }))),
-]);
+const perpendicular = signedPerpendicularFeature({ x: 0.5, y: 0.1 }, { x: 0, y: 0 }, { x: 1, y: 0 });
+if (Math.abs(perpendicular - 0.1) > 1e-9) throw new Error("眼軸に対する虹彩の局所縦座標計算に失敗");
+const separatedAxes = measureAxisSeparation([0.15, 0.5, 0.85].flatMap((targetY) =>
+  [0.15, 0.5, 0.85].flatMap((targetX) => [-0.002, 0, 0.002].map((noise, repeat) => ({
+    targetX, targetY, repeat, screenX: targetX * 0.1 + noise, screenY: targetY * 0.1 + noise,
+  })))));
 if (!separatedAxes.horizontal_separated || !separatedAxes.vertical_separated) throw new Error("視線軸の分離判定に失敗");
+if (!separatedAxes.vertical.monotonic || separatedAxes.vertical.point_statistics.some((point) => point.samples !== 3)) throw new Error("縦方向の3回測定統計または単調性判定に失敗");
+const smallButReliableGap = measureAxisSeparation([0.15, 0.5, 0.85].flatMap((targetY, yIndex) =>
+  [0.15, 0.5, 0.85].flatMap((targetX, xIndex) => [-0.0005, 0, 0.0005].map((noise, repeat) => ({
+    targetX, targetY, repeat, screenX: 0.4 + xIndex * 0.01 + noise, screenY: 0.4 + yIndex * 0.01 + noise,
+  })))));
+if (!smallButReliableGap.vertical_separated || Math.max(...smallButReliableGap.vertical.adjacent_differences.map(Math.abs)) >= 0.025) {
+  throw new Error("固定差0.025未満の安定した縦信号を利用可能と判定できません");
+}
 const referencePose = { faceCenterX: 0.5, faceCenterY: 0.5, yaw: 0, pitch: 0.6, eyeDistance: 0.34 };
 const moderatePose = evaluatePoseQuality({ faceDetected: true, faceCenterX: 0.5, faceCenterY: 0.64, yaw: 0, pitch: 0.6, eyeDistance: 0.34 }, referencePose);
 if (moderatePose.level !== "usable" || moderatePose.weight <= 0) throw new Error("通常の顔移動を利用可能として残せません");
