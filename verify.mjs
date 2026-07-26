@@ -29,20 +29,26 @@ const requiredAppMarkers = [
   "sync_ms", "currentSyncMs", "runCalibration", "setPreviewMode", "preview-hidden",
   "drawHeatmap", "drawTimeline", "drawReactionComposite", "exportReaction",
   "content_blob", "rear_blob", "legacy_capture", "indexedDB", "renderLibrary",
-  "navigator.share", "libraryDelete", "schema_version: 5", "currentCaptureGeometry", "recording_geometry",
+  "navigator.share", "libraryDelete", "schema_version: 6", "currentCaptureGeometry", "recording_geometry",
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
   "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
-  "steps: 0", "CALIBRATION_FIT_TIMEOUT_MS = 60000", "CALIBRATION_MIN_SAMPLES = 1", "affine2d", "fitAffineCorrection",
+  "CALIBRATION_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
+  "randomized-nine-point-direct-mapping", "fitDirectGazeMapping", "gaze_quality",
+  "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
+if (app.includes("fitSpecializedGazeCalibration") || app.includes("CALIBRATION_CORRECTION_POINTS") || app.includes("steps: 0")) {
+  throw new Error("旧WebEyeTrack追加学習または後段5点補正が残っています");
+}
 
 const requiredHtmlMarkers = [
   'accept="image/*,video/*"', "小窓", "非表示", "表情映像も端末内に保存する",
   "iPhone・iPadを含む", "視線ヒートマップ", "反応の波", "端末内ライブラリ",
   "YouTube URL", "YouTube選択時は動画再生のためYouTubeへ接続します", "youtubeReactionNote",
   "背景の動画は調整中だけ隠れています",
+  'id="calibrationTarget" class="calibration-target" type="button"',
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);
