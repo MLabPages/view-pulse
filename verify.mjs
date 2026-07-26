@@ -32,7 +32,7 @@ const requiredAppMarkers = [
   "navigator.share", "libraryDelete", "schema_version: 5", "currentCaptureGeometry", "recording_geometry",
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
-  "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"",
+  "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -50,6 +50,9 @@ if (app.includes('facingMode: { exact: "environment" }') || html.includes("前�
 }
 if (!css.includes("@media (max-width: 650px)")) throw new Error("スマホ向けレイアウトが不足");
 if (!css.includes("word-break: keep-all")) throw new Error("見出しの自然な改行設定が不足");
+if (!css.includes(".library-back-button") || !css.includes(".library-open-target") || !css.includes('content: "分析を見る"')) {
+  throw new Error("ライブラリの戻る操作または分析を開く導線が不足");
+}
 if (!readme.includes("旧版") || !readme.includes("外部へ送信")) throw new Error("互換性またはプライバシー説明が不足");
 if (!readme.includes("Netflix") || !readme.includes("YouTube共有から起動")) throw new Error("対応範囲の説明が不足");
 
