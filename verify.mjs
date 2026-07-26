@@ -34,10 +34,10 @@ const requiredAppMarkers = [
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
   "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
-  "CALIBRATION_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 2", "CALIBRATION_MAX_SAMPLES = 5",
+  "CALIBRATION_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
   "randomized-three-pass-nine-point-direct-mapping", "selectDirectGazeMapping", "calibrationRequiredSamples", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
-  "excluded_outliers", "raw_spread", "unstable",
+  "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -51,6 +51,7 @@ const requiredHtmlMarkers = [
   "YouTube URL", "YouTube選択時は動画再生のためYouTubeへ接続します", "youtubeReactionNote",
   "背景の動画は調整中だけ隠れています",
   'id="calibrationTarget" class="calibration-target" type="button"',
+  'id="faceAlignmentGuide"', "顔の位置・距離・向きを調整時と本測定でそろえます",
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);

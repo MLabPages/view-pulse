@@ -108,7 +108,15 @@ h1 span { color: var(--accent); }
 .calibration-layer { position: absolute; inset: 0; background: #000; z-index: 8; }
 .calibration-target { position: absolute; width: 34px; height: 34px; padding: 0; border: 3px solid var(--accent); border-radius: 50%; transform: translate(-50%,-50%); box-shadow: 0 0 0 8px rgba(229,255,63,.18); background: #000; cursor: default; opacity: 1; }
 .calibration-target.ready { cursor: pointer; animation: calibration-ready 1s ease-in-out infinite; }
+.calibration-target.aligning { visibility: hidden; }
 @keyframes calibration-ready { 50% { box-shadow: 0 0 0 15px rgba(229,255,63,.08); } }
+.face-alignment-guide { position: absolute; z-index: 2; left: 50%; top: 45%; width: min(280px, 74vw); transform: translate(-50%,-50%); text-align: center; }
+.face-guide-oval { position: relative; width: 150px; height: 190px; margin: 0 auto 18px; border: 3px solid var(--coral); border-radius: 48%; background: rgba(255,255,255,.03); box-shadow: 0 0 0 10px rgba(255,107,91,.1); }
+.face-guide-dot { position: absolute; transform: translate(-50%,-50%); color: var(--coral); font-size: 22px; line-height: 1; transition: left .15s, top .15s; }
+.face-alignment-guide.ready .face-guide-oval { border-color: var(--accent); box-shadow: 0 0 0 10px rgba(229,255,63,.12); }
+.face-alignment-guide.ready .face-guide-dot { color: var(--accent); }
+.face-alignment-guide strong, .face-alignment-guide small { display: block; }
+.face-alignment-guide small { margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .calibration-target::after { content: ""; position: absolute; width: 6px; height: 6px; background: var(--coral); border-radius: 50%; left: 11px; top: 11px; }
 .calibration-message { position: absolute; left: 50%; bottom: 160px; transform: translateX(-50%); background: rgba(0,0,0,.72); border-radius: 99px; padding: 9px 15px; font-size: 12px; white-space: nowrap; }
 .calibration-message span { color: var(--accent); margin-left: 8px; }

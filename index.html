@@ -104,6 +104,11 @@
       </header>
 
       <div id="calibrationLayer" class="calibration-layer hidden">
+        <div id="faceAlignmentGuide" class="face-alignment-guide hidden">
+          <div class="face-guide-oval"><span id="faceGuideDot" class="face-guide-dot">●</span></div>
+          <strong id="faceGuideStatus">顔マークを枠の中央へ合わせてください</strong>
+          <small>顔の位置・距離・向きを調整時と本測定でそろえます</small>
+        </div>
         <button id="calibrationTarget" class="calibration-target" type="button" disabled aria-label="この点を見たままクリック"></button>
         <div class="calibration-message"><strong id="calibrationInstruction">点を見てください</strong><span id="calibrationProgress">1 / 9</span><small>背景の動画は調整中だけ隠れています</small></div>
       </div>
