@@ -161,6 +161,7 @@
             <video id="resultContentVideo" controls playsinline class="hidden"></video>
             <div id="resultYoutubeWrap" class="youtube-player-wrap hidden"><div id="resultYoutubePlayer"></div></div>
             <canvas id="heatmapCanvas"></canvas>
+            <div id="aoiOverlay" class="aoi-overlay hidden" aria-label="画像上の注目領域"></div>
           </div>
           <div class="viewer-toolbar">
             <label>表示
@@ -172,7 +173,30 @@
             </label>
             <span><i class="heat-dot"></i>推定視線分布</span>
           </div>
+          <div class="analysis-toolbar">
+            <label>分析
+              <select id="analysisMode">
+                <option value="overall">全体</option>
+                <option value="segments">時間帯別ヒートマップ</option>
+                <option value="aoi">要素別</option>
+              </select>
+            </label>
+            <label id="segmentSecondsLabel">区切り
+              <select id="segmentSeconds"><option value="10">10秒</option><option value="5">5秒</option></select>
+            </label>
+          </div>
         </div>
+
+        <section id="segmentPanel" class="analysis-detail hidden">
+          <div class="section-title"><div><span>ATTENTION OVER TIME</span><h2>注目の変化</h2></div><p>時間帯を選ぶと大きく表示します</p></div>
+          <div id="segmentDetail" class="segment-detail"></div>
+          <div id="segmentGrid" class="segment-grid"></div>
+        </section>
+
+        <section id="aoiPanel" class="analysis-detail hidden">
+          <div class="section-title"><div><span>MANUAL AOI</span><h2>要素別</h2></div><p id="aoiHelp">画像上をドラッグして領域を追加します</p></div>
+          <div id="aoiList" class="aoi-list"></div>
+        </section>
 
         <div class="insight-grid">
           <article><span class="metric-label">視線推定有効率</span><strong id="metricTracked">—</strong><small>顔と目を検出できた割合</small></article>
