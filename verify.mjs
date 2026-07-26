@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
-import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
+import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, selectDirectGazeMapping } from "./gaze-calibration.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -33,12 +33,13 @@ const requiredAppMarkers = [
   "navigator.share", "libraryDelete", "schema_version: 6", "currentCaptureGeometry", "recording_geometry",
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
-  "webeyetrack.worker.js", "gaze_engine: \"webeyetrack\"", "youtubeThumbnailUrl", "library-open-target",
+  "webeyetrack.worker.js", "gaze_engine: gazeEngine", "youtubeThumbnailUrl", "library-open-target",
   "CALIBRATION_REPEATS = 3", "CALIBRATION_MIN_SAMPLES = 3", "CALIBRATION_MAX_SAMPLES = 5",
   "randomized-three-pass-nine-point-direct-mapping", "selectDirectGazeMapping", "calibrationRequiredSamples", "gaze_quality",
   "raw_samples", "representative_points", "training_points", "waitForCalibrationTargetClick",
   "excluded_outliers", "raw_spread", "unstable", "waitForFaceAlignment", "face_center_x", "face_center_y",
   "gaze_pose_quality", "gaze_weight", "gaze_pose_deviation", "gaze_missing_reason", "model_output_stale", "renderRecordingFaceGuide", "左上の枠と点を合わせてください",
+  'gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack"', "raw_gaze_age_ms", "axis_separation", "上下方向を十分に識別できていません", "mapped_out_of_bounds",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -89,6 +90,10 @@ if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopol
 }
 
 if (median([1, 9, 3, 5]) !== 4) throw new Error("偶数サンプルの中央値計算に失敗");
+const separatedAxes = measureAxisSeparation([
+  ...[0.15, 0.5, 0.85].flatMap((targetY) => [0.15, 0.5, 0.85].map((targetX) => ({ targetX, targetY, screenX: targetX, screenY: targetY }))),
+]);
+if (!separatedAxes.horizontal_separated || !separatedAxes.vertical_separated) throw new Error("視線軸の分離判定に失敗");
 const referencePose = { faceCenterX: 0.5, faceCenterY: 0.5, yaw: 0, pitch: 0.6, eyeDistance: 0.34 };
 const moderatePose = evaluatePoseQuality({ faceDetected: true, faceCenterX: 0.5, faceCenterY: 0.64, yaw: 0, pitch: 0.6, eyeDistance: 0.34 }, referencePose);
 if (moderatePose.level !== "usable" || moderatePose.weight <= 0) throw new Error("通常の顔移動を利用可能として残せません");
