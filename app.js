@@ -101,6 +101,7 @@ let specializedGaze = null;
 let webEyeLastStepError = "";
 let webEyeBackend = "";
 let gazeEngine = "webeyetrack";
+let gazeFallbackReason = "";
 let webEyeEyesClosed = 0;
 let analysisRunning = false;
 let analysisRaf = 0;
@@ -405,17 +406,16 @@ function stopAllStreams() {
 
 function loadSpecializedGazeModel() {
   if (webEyeReady && webEyeWorker) return Promise.resolve();
+  // Once this browser has proven it cannot host the Worker, keep using the
+  // main-thread estimation instead of downloading the model again.
+  if (gazeFallbackReason) {
+    gazeEngine = "mediapipe-iris";
+    return Promise.resolve();
+  }
   stopSpecializedGazeModel();
   els.analysisBadge.querySelector("span").textContent = "専用視線モデルを読込中";
   return new Promise((resolve, reject) => {
     let worker;
-    try {
-      worker = new Worker(SPECIALIZED_GAZE_WORKER_URL);
-    } catch (error) {
-      reject(gazeModelError("専用視線モデルを開始できませんでした（このブラウザはWorkerに未対応の可能性があります）"));
-      return;
-    }
-    webEyeWorker = worker;
     let settled = false;
     const finish = (callback, value) => {
       if (settled) return;
@@ -426,16 +426,39 @@ function loadSpecializedGazeModel() {
     const timeout = window.setTimeout(() => {
       finish(reject, gazeModelError("専用視線モデルの読み込みが時間内に終わりませんでした。通信状況を確認して、もう一度お試しください"));
     }, SPECIALIZED_GAZE_INIT_TIMEOUT_MS);
+    // The specialized model runs inside a Worker. Some browsers (notably
+    // Chrome on iOS, whose user agent lacks the Safari "Version/" token)
+    // make the bundled MediaPipe build touch `document`, which does not
+    // exist in a Worker. Instead of blocking the whole capture, fall back to
+    // the main-thread iris estimation that is already supported here.
+    const fallback = (reason) => {
+      console.warn("Specialized gaze model unavailable; using main-thread iris estimation", reason);
+      webEyeWorker?.terminate();
+      webEyeWorker = null;
+      webEyeReady = false;
+      webEyeBusy = false;
+      webEyeBackend = "";
+      gazeEngine = "mediapipe-iris";
+      gazeFallbackReason = reason || "unknown";
+      finish(resolve);
+    };
+    try {
+      worker = new Worker(SPECIALIZED_GAZE_WORKER_URL);
+    } catch (error) {
+      fallback(error?.message || "worker-unsupported");
+      return;
+    }
+    webEyeWorker = worker;
     worker.onmessage = (event) => {
       const message = event.data || {};
       if (message.type === "ready") {
         webEyeReady = true;
         webEyeBackend = message.backend || "";
         gazeEngine = webEyeBackend === "cpu" ? "mediapipe-iris" : "webeyetrack";
+        gazeFallbackReason = "";
         finish(resolve);
       } else if (message.type === "initError") {
-        webEyeReady = false;
-        finish(reject, gazeModelError(`専用視線モデルを読み込めませんでした（${message.message || "原因不明"}）`));
+        fallback(message.message || "initError");
       } else if (message.type === "stepError") {
         webEyeBusy = false;
         webEyeLastStepError = message.message || "";
@@ -450,9 +473,7 @@ function loadSpecializedGazeModel() {
       }
     };
     worker.onerror = (event) => {
-      webEyeBusy = false;
-      webEyeReady = false;
-      finish(reject, gazeModelError(event.message || "専用視線モデルを開始できませんでした"));
+      fallback(event?.message || "worker-error");
     };
     worker.postMessage({
       type: "init",
@@ -465,6 +486,12 @@ function gazeModelError(message) {
   const error = new Error(message);
   error.gazeModel = true;
   return error;
+}
+
+// Gaze estimation is ready either through the Worker-hosted specialized model
+// or through the main-thread iris fallback used when the Worker cannot run.
+function gazeEstimationReady() {
+  return webEyeReady || gazeEngine === "mediapipe-iris";
 }
 
 function stopSpecializedGazeModel() {
@@ -620,7 +647,7 @@ function updateAnalysisBadge(metrics) {
   const span = els.analysisBadge.querySelector("span");
   renderRecordingFaceGuide(metrics);
   if (!metrics?.faceDetected) span.textContent = "顔を画面側へ向けてください";
-  else if (!webEyeReady) span.textContent = "専用視線モデルを読込中";
+  else if (!gazeEstimationReady()) span.textContent = "専用視線モデルを読込中";
   else if (calibrationModel && evaluatePoseQuality(metrics, calibrationModel.pose).level === "excluded") span.textContent = "顔位置が大きく変わり視線を一時保留中";
   else span.textContent = specializedGaze
     ? (gazeEngine === "mediapipe-iris" ? "CPU向け高速虹彩推定で端末内解析" : "専用モデルで視線・表情を端末内解析")
@@ -764,7 +791,7 @@ function sampleMetrics(now, metrics, contentProgress = { validForContent: true, 
 }
 
 async function runCalibration() {
-  if (!frontStream || !faceLandmarker || !webEyeReady || recording) {
+  if (!frontStream || !faceLandmarker || !gazeEstimationReady() || recording) {
     els.captureHint.textContent = "専用視線モデルを準備中です。少し待ってから視線調整を開始してください";
     return;
   }
