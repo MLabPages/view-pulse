@@ -162,6 +162,7 @@
             <div id="resultYoutubeWrap" class="youtube-player-wrap hidden"><div id="resultYoutubePlayer"></div></div>
             <canvas id="heatmapCanvas"></canvas>
             <div id="aoiOverlay" class="aoi-overlay hidden" aria-label="画像上の注目領域"></div>
+            <div id="dynamicAoiOverlay" class="dynamic-aoi-overlay hidden" aria-label="動画内で認識した動く物体"></div>
           </div>
           <div class="viewer-toolbar">
             <label>表示
@@ -179,6 +180,7 @@
                 <option value="overall">全体</option>
                 <option value="segments">時間帯別ヒートマップ</option>
                 <option value="aoi">要素別</option>
+                <option value="dynamic-aoi">動的AOI（実験）</option>
               </select>
             </label>
             <label id="segmentSecondsLabel">区切り
@@ -198,6 +200,13 @@
           <div class="section-title"><div><span>MANUAL AOI</span><h2>要素別</h2></div><p id="aoiHelp">画像上をドラッグして領域を追加します</p></div>
           <div id="aoiJourney" class="aoi-journey"></div>
           <div id="aoiList" class="aoi-list"></div>
+        </section>
+
+        <section id="dynamicAoiPanel" class="analysis-detail hidden">
+          <div class="section-title"><div><span>EXPERIMENTAL DYNAMIC AOI</span><h2>動く物体別</h2></div><p>端末から選んだ動画専用</p></div>
+          <p class="dynamic-aoi-note">測定後の動画だけを端末内で解析します。視線調整・座標補正・既存ヒートマップは変更しません。一般物体の自動認識のため、研究者が名称と対象を確認してください。</p>
+          <div class="dynamic-aoi-controls"><button id="dynamicAoiStartButton" type="button">物体認識を開始</button><span id="dynamicAoiStatus">物体認識は初期状態でOFFです</span></div>
+          <div id="dynamicAoiList" class="dynamic-aoi-list"></div>
         </section>
 
         <div class="insight-grid">
