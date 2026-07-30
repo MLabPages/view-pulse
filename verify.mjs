@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
-import { calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
+import { calculateAoiJourney, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -97,7 +97,16 @@ const aoiCheck = calculateAoiMetrics({ id: "a", x: .1, y: .1, width: .4, height:
   { image_elapsed_ms: 0, gaze_x: .2, gaze_y: .2 }, { image_elapsed_ms: 200, gaze_x: .2, gaze_y: .2 },
   { image_elapsed_ms: 400, gaze_x: "", gaze_y: "" }, { image_elapsed_ms: 600, gaze_x: .2, gaze_y: .2 },
 ], { intervalMs: 200 });
-if (aoiCheck.entries !== 1 || aoiCheck.dwell_ms !== 800 || aoiCheck.first_arrival_ms !== 0) throw new Error("AOIの簡易滞在ルールに失敗");
+if (aoiCheck.entries !== 1 || aoiCheck.dwell_ms !== 800 || aoiCheck.first_arrival_ms !== 0 || aoiCheck.first_dwell_ms !== 800 || aoiCheck.average_dwell_ms !== 800 || aoiCheck.revisits !== 0 || !aoiCheck.seen) throw new Error("AOIの簡易滞在ルールに失敗");
+const journeyCheck = calculateAoiJourney([
+  { id: "a", name: "人物", x: 0, y: 0, width: .5, height: 1 },
+  { id: "b", name: "商品", x: .5, y: 0, width: .5, height: 1 },
+], [
+  { image_elapsed_ms: 0, gaze_x: .2, gaze_y: .2 }, { image_elapsed_ms: 200, gaze_x: .2, gaze_y: .2 },
+  { image_elapsed_ms: 400, gaze_x: .7, gaze_y: .2 }, { image_elapsed_ms: 600, gaze_x: .7, gaze_y: .2 },
+  { image_elapsed_ms: 800, gaze_x: .2, gaze_y: .2 }, { image_elapsed_ms: 1000, gaze_x: .2, gaze_y: .2 },
+], { intervalMs: 200 });
+if (journeyCheck.sequence.map((item) => item.aoi_id).join(",") !== "a,b,a" || journeyCheck.transitions.length !== 2) throw new Error("AOI閲覧順序・遷移集計に失敗");
 if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopology") || gazeWeights.length < 500_000 || !gazeLicense.includes("MIT")) {
   throw new Error("専用視線モデルまたはライセンスが不足");
 }

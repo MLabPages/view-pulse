@@ -1,7 +1,7 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
-import { AOI_MIN_DWELL_MS, AOI_MISSING_GAP_MS, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
+import { AOI_MIN_DWELL_MS, AOI_MISSING_GAP_MS, calculateAoiJourney, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
@@ -66,7 +66,7 @@ const els = {
   viewStage: $("viewStage"), heatmapCanvas: $("heatmapCanvas"), heatmapMode: $("heatmapMode"),
   analysisMode: $("analysisMode"), segmentSeconds: $("segmentSeconds"), segmentPanel: $("segmentPanel"), segmentGrid: $("segmentGrid"), segmentDetail: $("segmentDetail"),
   segmentSourcePreview: $("segmentSourcePreview"), segmentYoutubeThumbnail: $("segmentYoutubeThumbnail"),
-  aoiPanel: $("aoiPanel"), aoiOverlay: $("aoiOverlay"), aoiList: $("aoiList"), aoiHelp: $("aoiHelp"),
+  aoiPanel: $("aoiPanel"), aoiOverlay: $("aoiOverlay"), aoiList: $("aoiList"), aoiHelp: $("aoiHelp"), aoiJourney: $("aoiJourney"),
   timelineCanvas: $("timelineCanvas"), timelineHelp: $("timelineHelp"), metricTracked: $("metricTracked"),
   metricPositive: $("metricPositive"), metricZone: $("metricZone"),
   reactionUnavailable: $("reactionUnavailable"), reactionAvailable: $("reactionAvailable"),
@@ -1839,14 +1839,18 @@ function renderAoiAnalysis() {
   els.aoiList.replaceChildren();
   const metrics = calculateAllAoiMetrics();
   const first = metrics.filter((item) => item.first_arrival_ms != null).sort((a, b) => a.first_arrival_ms - b.first_arrival_ms)[0];
+  const journey = calculateAoiJourney(aoiRegions, samples, { intervalMs: ANALYSIS_INTERVAL_MS, minDwellMs: AOI_MIN_DWELL_MS, missingGapMs: AOI_MISSING_GAP_MS });
   els.aoiHelp.textContent = aoiRegions.length ? `最初に見られたAOI: ${aoiRegions.find((aoi) => aoi.id === first?.aoi_id)?.name || "—"}` : "画像上をドラッグして領域を追加します";
+  const sequenceText = journey.sequence.length ? journey.sequence.map((item) => item.aoi_name).join(" → ") : "—";
+  const transitionText = journey.transitions.length ? journey.transitions.map((item) => `${item.from_name} → ${item.to_name}: ${item.count}回`).join("／") : "—";
+  els.aoiJourney.innerHTML = `<strong>推定閲覧順序</strong><span>${escapeHtml(sequenceText)}</span><strong>AOI間の推定視線遷移</strong><span>${escapeHtml(transitionText)}</span><small>Seen率は複数参加者の同条件データを集計する指標です。この画面では各記録の「見た／未到達」を表示します。</small>`;
   aoiRegions.forEach((aoi) => {
     const box = document.createElement("div"); box.className = "aoi-box"; box.dataset.id = aoi.id;
     box.style.left = `${aoi.x * 100}%`; box.style.top = `${aoi.y * 100}%`; box.style.width = `${aoi.width * 100}%`; box.style.height = `${aoi.height * 100}%`;
     const label = document.createElement("span"); label.textContent = aoi.name; const resize = document.createElement("button"); resize.type = "button"; resize.className = "aoi-resize"; resize.setAttribute("aria-label", `${aoi.name}のサイズを変更`); box.append(label, resize); els.aoiOverlay.append(box);
     const metric = metrics.find((item) => item.aoi_id === aoi.id);
     const row = document.createElement("div"); row.className = "aoi-row";
-    const text = document.createElement("div"); text.innerHTML = `<strong>${escapeHtml(aoi.name)}</strong><small>推定初回到達時間: ${metric?.first_arrival_ms == null ? "—" : `${(metric.first_arrival_ms / 1000).toFixed(1)}秒`}<br>推定視線滞在時間: ${(metric?.dwell_ms || 0) / 1000}秒<br>推定視線進入回数: ${metric?.entries || 0}回<br>推定視線時間割合: ${Math.round((metric?.valid_time_ratio || 0) * 100)}%</small>`;
+    const text = document.createElement("div"); text.innerHTML = `<strong>${escapeHtml(aoi.name)}</strong><small>到達状況: ${metric?.seen ? "見た" : "未到達"}<br>推定初回到達時間: ${metric?.first_arrival_ms == null ? "—" : `${(metric.first_arrival_ms / 1000).toFixed(1)}秒`}<br>最初の推定滞在時間: ${metric?.first_dwell_ms == null ? "—" : `${(metric.first_dwell_ms / 1000).toFixed(1)}秒`}<br>推定視線滞在時間: ${((metric?.dwell_ms || 0) / 1000).toFixed(1)}秒<br>平均推定滞在時間: ${metric?.average_dwell_ms == null ? "—" : `${(metric.average_dwell_ms / 1000).toFixed(1)}秒`}<br>推定視線進入回数: ${metric?.entries || 0}回<br>推定再訪回数: ${metric?.revisits || 0}回<br>推定視線時間割合: ${Math.round((metric?.valid_time_ratio || 0) * 100)}%</small>`;
     const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "削除"; remove.addEventListener("click", () => { aoiRegions = aoiRegions.filter((item) => item.id !== aoi.id); renderAoiAnalysis(); persistResultEdits(); }); row.append(text, remove); els.aoiList.append(row);
   });
 }
