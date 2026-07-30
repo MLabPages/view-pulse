@@ -26,9 +26,8 @@ export function segmentSamples(samples = [], segmentSeconds = 10, durationMs = 0
   });
 }
 
-export function calculateAoiMetrics(aoi, samples = [], { intervalMs = 200, minDwellMs = AOI_MIN_DWELL_MS, missingGapMs = AOI_MISSING_GAP_MS } = {}) {
+function qualifiedAoiVisits(aoi, samples = [], { intervalMs = 200, minDwellMs = AOI_MIN_DWELL_MS, missingGapMs = AOI_MISSING_GAP_MS } = {}) {
   const ordered = samples.slice().sort((a, b) => sampleTime(a) - sampleTime(b));
-  const totalValidMs = ordered.filter(validGaze).length * intervalMs;
   const visits = [];
   let active = null;
   for (const sample of ordered) {
@@ -47,14 +46,42 @@ export function calculateAoiMetrics(aoi, samples = [], { intervalMs = 200, minDw
     else if (active && time - active.last_ms > missingGapMs) { visits.push(active); active = null; }
   }
   if (active) visits.push(active);
-  const qualified = visits.map((visit) => ({ ...visit, duration_ms: visit.last_ms - visit.first_ms + intervalMs }))
+  return visits.map((visit) => ({ ...visit, duration_ms: visit.last_ms - visit.first_ms + intervalMs }))
     .filter((visit) => visit.duration_ms >= minDwellMs);
+}
+
+export function calculateAoiMetrics(aoi, samples = [], options = {}) {
+  const intervalMs = options.intervalMs ?? 200;
+  const totalValidMs = samples.filter(validGaze).length * intervalMs;
+  const qualified = qualifiedAoiVisits(aoi, samples, options);
   const dwell_ms = qualified.reduce((sum, visit) => sum + visit.duration_ms, 0);
   return {
     aoi_id: aoi.id,
     first_arrival_ms: qualified[0]?.first_ms ?? null,
     dwell_ms,
     entries: qualified.length,
+    first_dwell_ms: qualified[0]?.duration_ms ?? null,
+    average_dwell_ms: qualified.length ? dwell_ms / qualified.length : null,
+    revisits: Math.max(0, qualified.length - 1),
+    seen: qualified.length > 0,
     valid_time_ratio: totalValidMs ? dwell_ms / totalValidMs : 0,
   };
+}
+
+export function calculateAoiJourney(aois = [], samples = [], options = {}) {
+  const visits = aois.flatMap((aoi) => qualifiedAoiVisits(aoi, samples, options)
+    .map((visit) => ({ ...visit, aoi_id: aoi.id, aoi_name: aoi.name }))
+  ).sort((a, b) => a.first_ms - b.first_ms || a.last_ms - b.last_ms);
+  const sequence = [];
+  for (const visit of visits) {
+    if (sequence.at(-1)?.aoi_id !== visit.aoi_id) sequence.push(visit);
+  }
+  const transitions = [];
+  for (let index = 1; index < sequence.length; index++) {
+    const from = sequence[index - 1], to = sequence[index];
+    const existing = transitions.find((item) => item.from_aoi_id === from.aoi_id && item.to_aoi_id === to.aoi_id);
+    if (existing) existing.count += 1;
+    else transitions.push({ from_aoi_id: from.aoi_id, from_name: from.aoi_name, to_aoi_id: to.aoi_id, to_name: to.aoi_name, count: 1 });
+  }
+  return { sequence: sequence.map(({ aoi_id, aoi_name, first_ms }) => ({ aoi_id, aoi_name, first_ms })), transitions };
 }
