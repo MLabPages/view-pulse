@@ -3,6 +3,7 @@ import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
 import { calculateAoiJourney, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
+import { assignDynamicTracks, calculateDynamicAoiMetrics, dynamicAoiAtTime } from "./dynamic-aoi-utils.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
   readFile("index.html", "utf8"),
@@ -45,7 +46,7 @@ const requiredAppMarkers = [
   "3段階の順序と確認点の精度基準を満たしたため記録できます", "vertical_error", "verticalOrderConsistent",
   "resolveMappedGaze", "gaze_at_edge", "gaze_edge_overflow",
   "createYouTubeContentSync", "gaze_valid_for_content", "pause_reason", "youtube_time_not_advancing", "動画本編の開始を待っています", "記録を開始しました",
-  "heatmap_segment_seconds", "heatmap_segments", "image_presented_at", "image_elapsed_ms", "aoi_regions", "推定初回到達時間", "AOI_MIN_DWELL_MS", "content-withheld", "contentKind === \"youtube\"", "映像フレームは表示できません", "maxresdefault", "segmentYoutubeThumbnail",
+  "heatmap_segment_seconds", "heatmap_segments", "image_presented_at", "image_elapsed_ms", "aoi_regions", "推定初回到達時間", "AOI_MIN_DWELL_MS", "content-withheld", "contentKind === \"youtube\"", "映像フレームは表示できません", "maxresdefault", "segmentYoutubeThumbnail", "dynamic_aoi_frames", "analyzeDynamicAois", "ObjectDetector",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -60,6 +61,7 @@ const requiredHtmlMarkers = [
   "背景の動画は調整中だけ隠れています",
   'id="calibrationTarget" class="calibration-target" type="button"',
   'id="faceAlignmentGuide"', "顔の位置・距離・向きを調整時と本測定でそろえます", 'id="recordingFaceGuide"', "正面・顔位置 OK",
+  "動的AOI（実験）", "物体認識を開始", 'id="dynamicAoiOverlay"',
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);
@@ -107,6 +109,23 @@ const journeyCheck = calculateAoiJourney([
   { image_elapsed_ms: 800, gaze_x: .2, gaze_y: .2 }, { image_elapsed_ms: 1000, gaze_x: .2, gaze_y: .2 },
 ], { intervalMs: 200 });
 if (journeyCheck.sequence.map((item) => item.aoi_id).join(",") !== "a,b,a" || journeyCheck.transitions.length !== 2) throw new Error("AOI閲覧順序・遷移集計に失敗");
+const dynamicFrames = [
+  { sync_ms: 0, detections: [{ label: "person", display_name: "人物", x: .1, y: .1, width: .3, height: .5 }] },
+  { sync_ms: 500, detections: [{ label: "person", display_name: "人物", x: .12, y: .1, width: .3, height: .5 }] },
+  { sync_ms: 1000, detections: [{ label: "cup", display_name: "カップ", x: .7, y: .5, width: .15, height: .2 }] },
+];
+const dynamicTracks = assignDynamicTracks(dynamicFrames);
+if (dynamicTracks.length !== 2 || dynamicFrames[0].detections[0].track_id !== dynamicFrames[1].detections[0].track_id) throw new Error("動的AOIの物体追跡に失敗");
+const parallelPeople = [{ sync_ms: 0, detections: [
+  { label: "person", x: .05, y: .1, width: .25, height: .7 },
+  { label: "person", x: .65, y: .1, width: .25, height: .7 },
+] }];
+if (assignDynamicTracks(parallelPeople).length !== 2 || parallelPeople[0].detections[0].track_id === parallelPeople[0].detections[1].track_id) throw new Error("同一フレームの同種物体を分離できません");
+const dynamicMetric = calculateDynamicAoiMetrics(dynamicTracks[0], dynamicFrames, [
+  { sync_ms: 0, gaze_x: .2, gaze_y: .2 }, { sync_ms: 200, gaze_x: .2, gaze_y: .2 },
+  { sync_ms: 500, gaze_x: .25, gaze_y: .2 }, { sync_ms: 700, gaze_x: .9, gaze_y: .9 },
+], { intervalMs: 200 });
+if (!dynamicMetric.seen || dynamicMetric.entries !== 1 || dynamicMetric.dwell_ms !== 700 || dynamicAoiAtTime(dynamicFrames, 480)[0]?.label !== "person") throw new Error("動的AOIの視線集計に失敗");
 if (!gazeWorker.includes("WebEyeTrackWorker") || !gazeModel.includes("modelTopology") || gazeWeights.length < 500_000 || !gazeLicense.includes("MIT")) {
   throw new Error("専用視線モデルまたはライセンスが不足");
 }

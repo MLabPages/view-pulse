@@ -2,10 +2,12 @@ import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
 import { AOI_MIN_DWELL_MS, AOI_MISSING_GAP_MS, calculateAoiJourney, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
+import { DYNAMIC_AOI_DEFAULT_INTERVAL_MS, DYNAMIC_AOI_SLOW_INTERVAL_MS, assignDynamicTracks, calculateDynamicAoiMetrics, dynamicAoiAtTime } from "./dynamic-aoi-utils.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MEDIAPIPE_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const OBJECT_MODEL = "https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite";
 const ANALYSIS_INTERVAL_MS = 200;
 const SPECIALIZED_GAZE_INTERVAL_MS = 160;
 const SPECIALIZED_GAZE_MAX_AGE_MS = 1200;
@@ -67,6 +69,8 @@ const els = {
   analysisMode: $("analysisMode"), segmentSeconds: $("segmentSeconds"), segmentPanel: $("segmentPanel"), segmentGrid: $("segmentGrid"), segmentDetail: $("segmentDetail"),
   segmentSourcePreview: $("segmentSourcePreview"), segmentYoutubeThumbnail: $("segmentYoutubeThumbnail"),
   aoiPanel: $("aoiPanel"), aoiOverlay: $("aoiOverlay"), aoiList: $("aoiList"), aoiHelp: $("aoiHelp"), aoiJourney: $("aoiJourney"),
+  dynamicAoiPanel: $("dynamicAoiPanel"), dynamicAoiOverlay: $("dynamicAoiOverlay"), dynamicAoiStatus: $("dynamicAoiStatus"),
+  dynamicAoiStartButton: $("dynamicAoiStartButton"), dynamicAoiList: $("dynamicAoiList"),
   timelineCanvas: $("timelineCanvas"), timelineHelp: $("timelineHelp"), metricTracked: $("metricTracked"),
   metricPositive: $("metricPositive"), metricZone: $("metricZone"),
   reactionUnavailable: $("reactionUnavailable"), reactionAvailable: $("reactionAvailable"),
@@ -129,6 +133,12 @@ let imageAwaitingStart = false;
 let heatmapSegmentSeconds = HEATMAP_SEGMENT_DEFAULT_SECONDS;
 let activeHeatmapSegment = null;
 let aoiRegions = [];
+let dynamicAoiFrames = [];
+let dynamicAoiTracks = [];
+let dynamicAoiIntervalMs = DYNAMIC_AOI_DEFAULT_INTERVAL_MS;
+let dynamicAoiDetector = null;
+let dynamicAoiRunning = false;
+let dynamicAoiCancelRequested = false;
 let youtubeApiPromise = null;
 let youtubeCapturePlayer = null;
 let youtubeResultPlayer = null;
@@ -1222,6 +1232,9 @@ async function startRecording() {
   currentCaptureCreatedAt = "";
   frontChunks = [];
   samples = [];
+  dynamicAoiFrames = [];
+  dynamicAoiTracks = [];
+  dynamicAoiIntervalMs = DYNAMIC_AOI_DEFAULT_INTERVAL_MS;
   youtubeContentSync = contentKind === "youtube" ? createYouTubeContentSync() : null;
   recordingGeometry = calibrationModel.geometry;
   imageTimelineMs = 0;
@@ -1392,6 +1405,10 @@ function normalizeCapture(record) {
     heatmap_segment_seconds: Number(record.heatmap_segment_seconds) || HEATMAP_SEGMENT_DEFAULT_SECONDS,
     aoi_regions: Array.isArray(record.aoi_regions) ? record.aoi_regions : [],
     aoi_metrics: Array.isArray(record.aoi_metrics) ? record.aoi_metrics : [],
+    dynamic_aoi_interval_ms: Number(record.dynamic_aoi_interval_ms) || DYNAMIC_AOI_DEFAULT_INTERVAL_MS,
+    dynamic_aoi_frames: Array.isArray(record.dynamic_aoi_frames) ? record.dynamic_aoi_frames : [],
+    dynamic_aoi_tracks: Array.isArray(record.dynamic_aoi_tracks) ? record.dynamic_aoi_tracks : [],
+    dynamic_aoi_metrics: Array.isArray(record.dynamic_aoi_metrics) ? record.dynamic_aoi_metrics : [],
     heatmap_segments: Array.isArray(record.heatmap_segments) ? record.heatmap_segments : [],
     samples: normalizedSamples,
     legacy_capture: legacy,
@@ -1443,6 +1460,10 @@ async function saveCurrentCapture(thumbnail) {
     heatmap_segment_seconds: heatmapSegmentSeconds,
     aoi_regions: aoiRegions,
     aoi_metrics: calculateAllAoiMetrics(),
+    dynamic_aoi_interval_ms: dynamicAoiIntervalMs,
+    dynamic_aoi_frames: dynamicAoiFrames,
+    dynamic_aoi_tracks: dynamicAoiTracks,
+    dynamic_aoi_metrics: calculateAllDynamicAoiMetrics(),
     calibration_model: calibrationModel,
     recording_geometry: recordingGeometry,
     heatmap_segments: storedHeatmapSegments(),
@@ -1549,6 +1570,9 @@ async function openLibraryCapture(id) {
   imagePresentedAt = capture.image_presented_at || "";
   heatmapSegmentSeconds = capture.heatmap_segment_seconds || HEATMAP_SEGMENT_DEFAULT_SECONDS;
   aoiRegions = capture.aoi_regions || [];
+  dynamicAoiIntervalMs = capture.dynamic_aoi_interval_ms || DYNAMIC_AOI_DEFAULT_INTERVAL_MS;
+  dynamicAoiFrames = capture.dynamic_aoi_frames || [];
+  dynamicAoiTracks = capture.dynamic_aoi_tracks || [];
   calibrationModel = capture.calibration_model || null;
   currentCaptureId = capture.id;
   currentCaptureCreatedAt = capture.created_at;
@@ -1594,10 +1618,13 @@ async function prepareResults() {
   els.analysisMode.value = "overall";
   els.analysisMode.querySelector('option[value="segments"]').disabled = isImage;
   els.analysisMode.querySelector('option[value="aoi"]').disabled = !isImage;
+  els.analysisMode.querySelector('option[value="dynamic-aoi"]').disabled = contentKind !== "video";
   els.segmentSeconds.parentElement.classList.toggle("hidden", isImage);
   els.segmentPanel.classList.add("hidden");
   els.aoiPanel.classList.add("hidden");
   els.aoiOverlay.classList.add("hidden");
+  els.dynamicAoiPanel.classList.add("hidden");
+  els.dynamicAoiOverlay.classList.add("hidden");
   els.resultContentImage.classList.toggle("hidden", !isImage);
   els.resultContentVideo.classList.toggle("hidden", isImage || isYoutube);
   els.resultYoutubeWrap.classList.toggle("hidden", !isYoutube);
@@ -1640,6 +1667,7 @@ async function prepareResults() {
     drawHeatmap();
     drawTimeline();
     if (frontBlob) drawReactionFrame();
+    renderDynamicAoiAnalysis();
   });
 }
 
@@ -1852,6 +1880,163 @@ function renderAoiAnalysis() {
     const row = document.createElement("div"); row.className = "aoi-row";
     const text = document.createElement("div"); text.innerHTML = `<strong>${escapeHtml(aoi.name)}</strong><small>到達状況: ${metric?.seen ? "見た" : "未到達"}<br>推定初回到達時間: ${metric?.first_arrival_ms == null ? "—" : `${(metric.first_arrival_ms / 1000).toFixed(1)}秒`}<br>最初の推定滞在時間: ${metric?.first_dwell_ms == null ? "—" : `${(metric.first_dwell_ms / 1000).toFixed(1)}秒`}<br>推定視線滞在時間: ${((metric?.dwell_ms || 0) / 1000).toFixed(1)}秒<br>平均推定滞在時間: ${metric?.average_dwell_ms == null ? "—" : `${(metric.average_dwell_ms / 1000).toFixed(1)}秒`}<br>推定視線進入回数: ${metric?.entries || 0}回<br>推定再訪回数: ${metric?.revisits || 0}回<br>推定視線時間割合: ${Math.round((metric?.valid_time_ratio || 0) * 100)}%</small>`;
     const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "削除"; remove.addEventListener("click", () => { aoiRegions = aoiRegions.filter((item) => item.id !== aoi.id); renderAoiAnalysis(); persistResultEdits(); }); row.append(text, remove); els.aoiList.append(row);
+  });
+}
+
+const OBJECT_LABELS_JA = {
+  person: "人物", bicycle: "自転車", car: "自動車", motorcycle: "オートバイ", bus: "バス", train: "電車", truck: "トラック",
+  bottle: "ボトル", cup: "カップ", fork: "フォーク", knife: "ナイフ", spoon: "スプーン", bowl: "ボウル",
+  banana: "バナナ", apple: "りんご", sandwich: "サンドイッチ", orange: "オレンジ", broccoli: "ブロッコリー",
+  chair: "椅子", couch: "ソファ", bed: "ベッド", "dining table": "テーブル", tv: "テレビ", laptop: "ノートPC",
+  mouse: "マウス", remote: "リモコン", keyboard: "キーボード", "cell phone": "スマートフォン", book: "本", clock: "時計",
+};
+
+function calculateAllDynamicAoiMetrics() {
+  return dynamicAoiTracks.filter((track) => !track.hidden)
+    .map((track) => calculateDynamicAoiMetrics(track, dynamicAoiFrames, samples, { intervalMs: ANALYSIS_INTERVAL_MS }));
+}
+
+async function loadDynamicAoiDetector() {
+  if (dynamicAoiDetector) return dynamicAoiDetector;
+  els.dynamicAoiStatus.textContent = "物体認識モデルを端末へ読み込んでいます…";
+  const { FilesetResolver, ObjectDetector } = await import(MEDIAPIPE_MODULE);
+  const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM);
+  dynamicAoiDetector = await ObjectDetector.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: OBJECT_MODEL, delegate: "CPU" },
+    runningMode: "VIDEO", scoreThreshold: 0.45, maxResults: 8,
+  });
+  return dynamicAoiDetector;
+}
+
+function seekVideo(video, seconds) {
+  if (video.readyState >= 2 && Math.abs(video.currentTime - seconds) < 0.002) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => resolve();
+    video.addEventListener("seeked", done, { once: true });
+    video.currentTime = seconds;
+    window.setTimeout(done, 1200);
+  });
+}
+
+async function analyzeDynamicAois() {
+  if (contentKind !== "video" || dynamicAoiRunning || !contentResultUrl) return;
+  dynamicAoiRunning = true;
+  dynamicAoiCancelRequested = false;
+  els.dynamicAoiStartButton.disabled = false;
+  els.dynamicAoiStartButton.textContent = "解析を中止";
+  dynamicAoiFrames = [];
+  dynamicAoiTracks = [];
+  dynamicAoiIntervalMs = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.hardwareConcurrency || 8) <= 4
+    ? DYNAMIC_AOI_SLOW_INTERVAL_MS : DYNAMIC_AOI_DEFAULT_INTERVAL_MS;
+  try {
+    const detector = await loadDynamicAoiDetector();
+    const source = document.createElement("video");
+    source.src = contentResultUrl;
+    source.muted = true;
+    source.playsInline = true;
+    source.preload = "auto";
+    await new Promise((resolve) => {
+      if (source.readyState >= 2) resolve();
+      else source.addEventListener("loadeddata", resolve, { once: true });
+      window.setTimeout(resolve, 2000);
+    });
+    if (!source.videoWidth || !source.videoHeight || source.readyState < 2) throw new Error("video_frame_unavailable");
+    const durationMs = Math.max(1, Math.round((source.duration || contentDurationMs / 1000) * 1000));
+    dynamicAoiIntervalMs = Math.max(dynamicAoiIntervalMs, Math.ceil(durationMs / 1200 / 500) * 500);
+    let measuredTotal = 0, measuredCount = 0;
+    for (let time = 0; time < durationMs; time += dynamicAoiIntervalMs) {
+      if (dynamicAoiCancelRequested) throw new DOMException("cancelled", "AbortError");
+      await seekVideo(source, Math.min(time / 1000, Math.max(0, (source.duration || 0) - 0.02)));
+      els.dynamicAoiStatus.textContent = `物体を追跡しています… ${Math.min(100, Math.round(time / durationMs * 100))}%`;
+      await new Promise(requestAnimationFrame);
+      const started = performance.now();
+      const result = detector.detectForVideo(source, Math.max(1, time));
+      measuredTotal += performance.now() - started;
+      measuredCount += 1;
+      if (measuredCount === 3 && measuredTotal / measuredCount > 400) dynamicAoiIntervalMs = DYNAMIC_AOI_SLOW_INTERVAL_MS;
+      const detections = (result?.detections || []).map((item) => {
+        const box = item.boundingBox || {};
+        const category = item.categories?.[0] || {};
+        const label = category.categoryName || category.displayName || "object";
+        return {
+          label,
+          display_name: OBJECT_LABELS_JA[label] || category.displayName || label,
+          score: Math.round(Number(category.score || 0) * 1000) / 1000,
+          x: clamp(number(box.originX) / Math.max(1, source.videoWidth), 0, 1),
+          y: clamp(number(box.originY) / Math.max(1, source.videoHeight), 0, 1),
+          width: clamp(number(box.width) / Math.max(1, source.videoWidth), 0, 1),
+          height: clamp(number(box.height) / Math.max(1, source.videoHeight), 0, 1),
+        };
+      }).filter((item) => item.width > 0 && item.height > 0);
+      dynamicAoiFrames.push({ sync_ms: time, detections });
+    }
+    dynamicAoiTracks = assignDynamicTracks(dynamicAoiFrames, { maxMissingMs: dynamicAoiIntervalMs * 3 });
+    els.dynamicAoiStatus.textContent = dynamicAoiTracks.length
+      ? `${dynamicAoiTracks.length}個の動く物体を検出しました。名称変更や不要物体の削除ができます。`
+      : "この動画では対象物を十分に検出できませんでした。従来のヒートマップはそのまま利用できます。";
+    renderDynamicAoiAnalysis();
+    await persistResultEdits();
+  } catch (error) {
+    if (error?.name === "AbortError") els.dynamicAoiStatus.textContent = "物体認識を中止しました。従来のヒートマップには影響ありません。";
+    else {
+      console.error("Dynamic AOI analysis failed", error);
+      els.dynamicAoiStatus.textContent = "この端末では物体認識を完了できませんでした。従来のヒートマップには影響ありません。";
+    }
+  } finally {
+    dynamicAoiRunning = false;
+    dynamicAoiCancelRequested = false;
+    els.dynamicAoiStartButton.disabled = false;
+    els.dynamicAoiStartButton.textContent = dynamicAoiFrames.length ? "物体認識を再実行" : "物体認識を開始";
+  }
+}
+
+function dynamicMediaRect() {
+  const stage = els.viewStage.getBoundingClientRect();
+  const width = els.resultContentVideo.videoWidth || 16, height = els.resultContentVideo.videoHeight || 9;
+  const scale = Math.min(stage.width / width, stage.height / height);
+  const mediaWidth = width * scale, mediaHeight = height * scale;
+  return { x: (stage.width - mediaWidth) / 2, y: (stage.height - mediaHeight) / 2, width: mediaWidth, height: mediaHeight };
+}
+
+function renderDynamicAoiOverlay() {
+  els.dynamicAoiOverlay.replaceChildren();
+  if (contentKind !== "video" || els.analysisMode.value !== "dynamic-aoi" || !dynamicAoiFrames.length) return;
+  const rect = dynamicMediaRect();
+  const hiddenIds = new Set(dynamicAoiTracks.filter((track) => track.hidden).map((track) => track.id));
+  const tracksById = new Map(dynamicAoiTracks.map((track) => [track.id, track]));
+  for (const detection of dynamicAoiAtTime(dynamicAoiFrames, resultSyncMs())) {
+    if (hiddenIds.has(detection.track_id)) continue;
+    const box = document.createElement("div");
+    box.className = "dynamic-aoi-box";
+    box.style.left = `${rect.x + detection.x * rect.width}px`;
+    box.style.top = `${rect.y + detection.y * rect.height}px`;
+    box.style.width = `${detection.width * rect.width}px`;
+    box.style.height = `${detection.height * rect.height}px`;
+    const track = tracksById.get(detection.track_id);
+    box.textContent = `${track?.name || detection.display_name || detection.label} ${Math.round(detection.score * 100)}%`;
+    els.dynamicAoiOverlay.append(box);
+  }
+}
+
+function renderDynamicAoiAnalysis() {
+  els.dynamicAoiList.replaceChildren();
+  renderDynamicAoiOverlay();
+  if (!dynamicAoiFrames.length) {
+    els.dynamicAoiStatus.textContent = "測定後に動画フレームだけを端末内解析します。視線測定やヒートマップには影響しません。";
+    return;
+  }
+  const metrics = calculateAllDynamicAoiMetrics();
+  dynamicAoiTracks.filter((track) => !track.hidden).forEach((track) => {
+    const metric = metrics.find((item) => item.track_id === track.id);
+    const row = document.createElement("div"); row.className = "dynamic-aoi-row";
+    const text = document.createElement("div");
+    text.innerHTML = `<strong>${escapeHtml(track.name)}</strong><small>認識種類: ${escapeHtml(OBJECT_LABELS_JA[track.label] || track.label)}・検出 ${track.detections}回<br>到達状況: ${metric?.seen ? "見た" : "未到達"}<br>推定初回到達時間: ${metric?.first_arrival_ms == null ? "—" : `${(metric.first_arrival_ms / 1000).toFixed(1)}秒`}<br>推定視線滞在時間: ${((metric?.dwell_ms || 0) / 1000).toFixed(1)}秒<br>平均推定滞在時間: ${metric?.average_dwell_ms == null ? "—" : `${(metric.average_dwell_ms / 1000).toFixed(1)}秒`}<br>推定進入回数: ${metric?.entries || 0}回・推定再訪回数: ${metric?.revisits || 0}回</small>`;
+    const actions = document.createElement("div"); actions.className = "dynamic-aoi-actions";
+    const rename = document.createElement("button"); rename.type = "button"; rename.textContent = "名称変更";
+    rename.addEventListener("click", async () => { const name = prompt("物体の名称を入力してください", track.name)?.trim(); if (name) { track.name = name; renderDynamicAoiAnalysis(); await persistResultEdits(); } });
+    const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "除外";
+    remove.addEventListener("click", async () => { track.hidden = true; renderDynamicAoiAnalysis(); await persistResultEdits(); });
+    actions.append(rename, remove); row.append(text, actions); els.dynamicAoiList.append(row);
   });
 }
 
@@ -2123,6 +2308,10 @@ function captureDataBlob(capture) {
     image_presented_at: capture.image_presented_at || "",
     aoi_regions: capture.aoi_regions || [],
     aoi_metrics: capture.aoi_metrics || [],
+    dynamic_aoi_interval_ms: capture.dynamic_aoi_interval_ms || DYNAMIC_AOI_DEFAULT_INTERVAL_MS,
+    dynamic_aoi_frames: capture.dynamic_aoi_frames || [],
+    dynamic_aoi_tracks: capture.dynamic_aoi_tracks || [],
+    dynamic_aoi_metrics: capture.dynamic_aoi_metrics || [],
     heatmap_segments: capture.heatmap_segments || storedHeatmapSegments(),
     samples: capture.samples || [],
   }, null, 2)], { type: "application/json" });
@@ -2206,6 +2395,10 @@ function currentCapture() {
     image_presented_at: imagePresentedAt,
     aoi_regions: aoiRegions,
     aoi_metrics: calculateAllAoiMetrics(),
+    dynamic_aoi_interval_ms: dynamicAoiIntervalMs,
+    dynamic_aoi_frames: dynamicAoiFrames,
+    dynamic_aoi_tracks: dynamicAoiTracks,
+    dynamic_aoi_metrics: calculateAllDynamicAoiMetrics(),
     heatmap_segments: storedHeatmapSegments(),
     version: 5,
   };
@@ -2273,8 +2466,8 @@ els.contentVideo.addEventListener("loadedmetadata", () => {
 els.contentVideo.addEventListener("ended", () => { if (recording) stopRecording(); });
 els.newCaptureButton.addEventListener("click", () => location.reload());
 document.querySelectorAll(".tab").forEach((button) => button.addEventListener("click", () => { if (!button.disabled) selectTab(button.dataset.tab); }));
-els.resultContentVideo.addEventListener("timeupdate", () => { drawHeatmap(); drawTimeline(); });
-els.resultContentVideo.addEventListener("loadedmetadata", () => { resizeHeatmap(); drawHeatmap(); drawTimeline(); });
+els.resultContentVideo.addEventListener("timeupdate", () => { drawHeatmap(); drawTimeline(); renderDynamicAoiOverlay(); });
+els.resultContentVideo.addEventListener("loadedmetadata", () => { resizeHeatmap(); drawHeatmap(); drawTimeline(); renderDynamicAoiOverlay(); });
 els.resultContentImage.addEventListener("load", () => { resizeHeatmap(); drawHeatmap(); });
 els.heatmapMode.addEventListener("change", drawHeatmap);
 els.analysisMode.addEventListener("change", async () => {
@@ -2283,14 +2476,24 @@ els.analysisMode.addEventListener("change", async () => {
   els.segmentPanel.classList.toggle("hidden", mode !== "segments");
   els.aoiPanel.classList.toggle("hidden", mode !== "aoi");
   els.aoiOverlay.classList.toggle("hidden", mode !== "aoi");
+  els.dynamicAoiPanel.classList.toggle("hidden", mode !== "dynamic-aoi");
+  els.dynamicAoiOverlay.classList.toggle("hidden", mode !== "dynamic-aoi");
   if (mode === "segments") await renderSegmentHeatmaps();
   if (mode === "aoi") renderAoiAnalysis();
+  if (mode === "dynamic-aoi") renderDynamicAoiAnalysis();
   drawHeatmap();
 });
 els.segmentSeconds.addEventListener("change", async () => {
   heatmapSegmentSeconds = Number(els.segmentSeconds.value) === 5 ? 5 : 10;
   activeHeatmapSegment = null;
   if (els.analysisMode.value === "segments") await renderSegmentHeatmaps();
+});
+els.dynamicAoiStartButton.addEventListener("click", () => {
+  if (dynamicAoiRunning) {
+    dynamicAoiCancelRequested = true;
+    els.dynamicAoiStartButton.disabled = true;
+    els.dynamicAoiStatus.textContent = "物体認識を中止しています…";
+  } else analyzeDynamicAois();
 });
 let aoiPointerState = null;
 els.aoiOverlay.addEventListener("pointerdown", (event) => {
