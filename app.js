@@ -1,7 +1,7 @@
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
-import { AOI_MIN_DWELL_MS, AOI_MISSING_GAP_MS, calculateAoiJourney, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
+import { AOI_MIN_DWELL_MS, AOI_MISSING_GAP_MS, aoiMetricsToCsv, calculateAoiJourney, calculateAoiMetrics, librarySamplesToCsv, samplesToCsv, segmentSamples, summarizeCaptureQuality, toCsv } from "./analysis-utils.mjs";
 import { DYNAMIC_AOI_DEFAULT_INTERVAL_MS, DYNAMIC_AOI_SLOW_INTERVAL_MS, assignDynamicTracks, calculateDynamicAoiMetrics, dynamicAoiAtTime } from "./dynamic-aoi-utils.mjs";
 
 const MEDIAPIPE_MODULE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
@@ -25,6 +25,9 @@ const SPECIALIZED_GAZE_MODEL_URL = new URL("./web/model.json", import.meta.url);
 const LIBRARY_DB_NAME = "viewpulse-library";
 const LIBRARY_DB_VERSION = 1;
 const LIBRARY_STORE = "captures";
+const SCHEMA_VERSION = 7;
+const EXPERIMENT_STORAGE_KEY = "viewpulse-experiment-meta";
+const MAX_IMAGE_DURATION_SECONDS = 180;
 const CALIBRATION_POINTS = [
   { x: 0.15, y: 0.15 }, { x: 0.5, y: 0.15 }, { x: 0.85, y: 0.15 },
   { x: 0.15, y: 0.5 }, { x: 0.5, y: 0.5 }, { x: 0.85, y: 0.5 },
@@ -47,9 +50,13 @@ const els = {
   selectedMediaName: $("selectedMediaName"), selectedMediaMeta: $("selectedMediaMeta"),
   youtubeUrlInput: $("youtubeUrlInput"), youtubeStatus: $("youtubeStatus"), loadYoutubeButton: $("loadYoutubeButton"),
   consentAnalysis: $("consentAnalysis"), saveReactionVideo: $("saveReactionVideo"),
+  participantIdInput: $("participantIdInput"), conditionInput: $("conditionInput"),
+  imageDurationLabel: $("imageDurationLabel"), imageDurationInput: $("imageDurationInput"),
+  sessionNotesInput: $("sessionNotesInput"),
   prepareButton: $("prepareButton"), setupStatus: $("setupStatus"), openLibraryButton: $("openLibraryButton"),
   closeLibraryButton: $("closeLibraryButton"), libraryCountBadge: $("libraryCountBadge"),
   libraryGrid: $("libraryGrid"), libraryEmpty: $("libraryEmpty"), storageStatus: $("storageStatus"),
+  exportLibraryButton: $("exportLibraryButton"),
   contentStage: $("contentStage"), contentImage: $("contentImage"), contentVideo: $("contentVideo"),
   captureYoutubeWrap: $("captureYoutubeWrap"),
   frontPreview: $("frontPreview"), contentTypeBadge: $("contentTypeBadge"), closeCaptureButton: $("closeCaptureButton"),
@@ -72,12 +79,13 @@ const els = {
   dynamicAoiPanel: $("dynamicAoiPanel"), dynamicAoiOverlay: $("dynamicAoiOverlay"), dynamicAoiStatus: $("dynamicAoiStatus"),
   dynamicAoiStartButton: $("dynamicAoiStartButton"), dynamicAoiList: $("dynamicAoiList"),
   timelineCanvas: $("timelineCanvas"), timelineHelp: $("timelineHelp"), metricTracked: $("metricTracked"),
-  metricPositive: $("metricPositive"), metricZone: $("metricZone"),
+  metricPositive: $("metricPositive"), metricZone: $("metricZone"), metricCalibration: $("metricCalibration"),
   reactionUnavailable: $("reactionUnavailable"), reactionAvailable: $("reactionAvailable"),
   reactionCanvas: $("reactionCanvas"), playReactionButton: $("playReactionButton"),
   pauseReactionButton: $("pauseReactionButton"),
   exportReactionButton: $("exportReactionButton"), exportStatus: $("exportStatus"),
   downloadContentButton: $("downloadContentButton"), downloadDataButton: $("downloadDataButton"),
+  downloadCsvButton: $("downloadCsvButton"),
   shareCaptureButton: $("shareCaptureButton"), saveStatus: $("saveStatus"),
 };
 
@@ -145,6 +153,11 @@ let youtubeResultPlayer = null;
 let youtubeResultRaf = 0;
 let youtubeResultLastDrawAt = 0;
 let youtubeContentSync = null;
+let participantId = "";
+let condition = "";
+let sessionNotes = "";
+let imageDurationMs = 0;
+let imageStopTimer = 0;
 
 function showScreen(name) {
   els.setupScreen.classList.toggle("hidden", name !== "setup");
@@ -162,10 +175,46 @@ function updateReadiness() {
   const hasContent = !!selectedFile || (contentKind === "youtube" && !!youtubeVideoId);
   const ready = hasContent && els.consentAnalysis.checked;
   els.prepareButton.disabled = !ready;
+  updateExperimentFieldsVisibility();
   if (!hasContent) setSetupStatus("画像・動画を選ぶか、YouTube URLを入力してください");
   else if (!els.consentAnalysis.checked) setSetupStatus("端末内解析への同意を確認してください");
   else if (contentKind === "youtube") setSetupStatus("カメラ映像と解析値は端末内だけで処理し、動画再生はYouTubeへ接続します");
   else setSetupStatus("選んだコンテンツと解析値は、この端末内だけで処理されます");
+}
+
+function updateExperimentFieldsVisibility() {
+  els.imageDurationLabel.classList.toggle("hidden", contentKind !== "image");
+}
+
+function readExperimentFields() {
+  participantId = els.participantIdInput.value.trim();
+  condition = els.conditionInput.value.trim();
+  sessionNotes = els.sessionNotesInput.value.trim();
+  const seconds = Number(els.imageDurationInput.value);
+  imageDurationMs = contentKind === "image" && Number.isFinite(seconds) && seconds > 0
+    ? Math.round(Math.min(seconds, MAX_IMAGE_DURATION_SECONDS) * 1000)
+    : 0;
+  try {
+    sessionStorage.setItem(EXPERIMENT_STORAGE_KEY, JSON.stringify({
+      participant_id: participantId,
+      condition,
+      notes: sessionNotes,
+      image_duration_seconds: els.imageDurationInput.value,
+    }));
+  } catch {}
+}
+
+function restoreExperimentFields() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(EXPERIMENT_STORAGE_KEY) || "null");
+    if (saved) {
+      els.participantIdInput.value = saved.participant_id || "";
+      els.conditionInput.value = saved.condition || "";
+      els.sessionNotesInput.value = saved.notes || "";
+      els.imageDurationInput.value = saved.image_duration_seconds || "";
+    }
+  } catch {}
+  readExperimentFields();
 }
 
 function releaseSelectedUrl() {
@@ -335,6 +384,7 @@ async function prepareCapture() {
     setSetupStatus("このブラウザはカメラ解析または録画に対応していません。最新版のSafari・Chrome・Edgeをお試しください。", true);
     return;
   }
+  readExperimentFields();
   els.prepareButton.disabled = true;
   setSetupStatus("内カメと視線・表情モデルを準備しています…");
   showScreen("capture");
@@ -749,6 +799,8 @@ function beginActiveRecording() {
   recordStart = performance.now();
   frontRecorder?.start(500);
   els.recordingBadge.classList.remove("hidden");
+  els.captureScreen.classList.add("is-recording");
+  els.recordButton.title = "記録を終了";
   els.captureHint.textContent = "記録を開始しました";
   recordTimer = window.setInterval(updateRecordTime, 250);
   updateRecordTime();
@@ -1228,6 +1280,9 @@ async function startRecording() {
     els.captureHint.textContent = "視線調整が必要です。動画内の点を見ながら「視線調整」を完了してください";
     return;
   }
+  readExperimentFields();
+  window.clearTimeout(imageStopTimer);
+  imageStopTimer = 0;
   currentCaptureId = "";
   currentCaptureCreatedAt = "";
   frontChunks = [];
@@ -1259,6 +1314,8 @@ async function startRecording() {
   if (contentKind === "image") return;
   recording = true;
   els.recordButton.classList.add("recording");
+  els.recordButton.title = "記録を終了";
+  els.captureScreen.classList.add("is-recording");
   if (contentKind === "youtube") {
     els.recordingBadge.classList.add("hidden");
     els.captureHint.textContent = "動画本編の開始を待っています。広告が表示された場合は，広告終了後に自動で記録を開始します。";
@@ -1284,17 +1341,28 @@ async function beginImagePresentation() {
   imageAwaitingStart = false;
   imagePresentedAt = new Date().toISOString();
   recording = true;
+  els.recordButton.disabled = false;
   els.recordButton.classList.add("recording");
+  els.recordButton.title = "記録を終了";
+  els.captureScreen.classList.add("is-recording");
   beginActiveRecording();
   els.calibrateButton.disabled = true;
+  if (imageDurationMs > 0) {
+    els.captureHint.textContent = `画像を${Math.round(imageDurationMs / 1000)}秒表示します`;
+    imageStopTimer = window.setTimeout(() => { if (recording) stopRecording(); }, imageDurationMs);
+  }
 }
 
 async function stopRecording() {
   if (!recording || stopping) return;
   stopping = true;
   recording = false;
+  window.clearTimeout(imageStopTimer);
+  imageStopTimer = 0;
   clearInterval(recordTimer);
   youtubeContentSync = null;
+  els.captureScreen.classList.remove("is-recording");
+  els.recordButton.title = "記録開始";
   els.contentVideo.pause();
   youtubeCapturePlayer?.pauseVideo?.();
   els.recordButton.disabled = true;
@@ -1411,6 +1479,11 @@ function normalizeCapture(record) {
     dynamic_aoi_metrics: Array.isArray(record.dynamic_aoi_metrics) ? record.dynamic_aoi_metrics : [],
     heatmap_segments: Array.isArray(record.heatmap_segments) ? record.heatmap_segments : [],
     samples: normalizedSamples,
+    participant_id: record.participant_id || "",
+    condition: record.condition || "",
+    notes: record.notes || "",
+    image_duration_ms: Number(record.image_duration_ms) || 0,
+    quality_summary: summarizeCaptureQuality(normalizedSamples, record.calibration_model || null),
     legacy_capture: legacy,
   };
 }
@@ -1467,7 +1540,12 @@ async function saveCurrentCapture(thumbnail) {
     calibration_model: calibrationModel,
     recording_geometry: recordingGeometry,
     heatmap_segments: storedHeatmapSegments(),
-    version: 5,
+    participant_id: participantId,
+    condition,
+    notes: sessionNotes,
+    image_duration_ms: imageDurationMs,
+    quality_summary: summarizeCaptureQuality(samples, calibrationModel),
+    version: SCHEMA_VERSION,
   });
   await refreshLibraryBadge();
 }
@@ -1533,7 +1611,11 @@ function createLibraryCard(capture) {
   const detail = document.createElement("small");
   const legacyLabel = capture.legacy_capture ? "・旧版データ互換表示" : "";
   const kindLabel = capture.content_kind === "image" ? "画像" : capture.content_kind === "youtube" ? "YouTube" : "動画";
-  detail.textContent = `${formatDuration(capture.duration_ms)}・${kindLabel}・${capture.front_blob ? "表情映像あり" : "数値解析のみ"}${legacyLabel}`;
+  const quality = capture.quality_summary || summarizeCaptureQuality(capture.samples, capture.calibration_model);
+  const qualityLabel = quality.gaze_quality === "accepted" ? "調整済み" : quality.gaze_quality === "rejected" ? "低精度" : "未調整";
+  const participantLabel = capture.participant_id ? `・${capture.participant_id}` : "";
+  const conditionLabel = capture.condition ? `・${capture.condition}` : "";
+  detail.textContent = `${formatDuration(capture.duration_ms)}・${kindLabel}${participantLabel}${conditionLabel}・${qualityLabel}・${capture.front_blob ? "表情映像あり" : "数値解析のみ"}${legacyLabel}`;
   meta.append(title, name, detail);
   const actions = document.createElement("div");
   actions.className = "library-card-actions";
@@ -1574,6 +1656,10 @@ async function openLibraryCapture(id) {
   dynamicAoiFrames = capture.dynamic_aoi_frames || [];
   dynamicAoiTracks = capture.dynamic_aoi_tracks || [];
   calibrationModel = capture.calibration_model || null;
+  participantId = capture.participant_id || "";
+  condition = capture.condition || "";
+  sessionNotes = capture.notes || "";
+  imageDurationMs = capture.image_duration_ms || 0;
   currentCaptureId = capture.id;
   currentCaptureCreatedAt = capture.created_at;
   await prepareResults();
@@ -1697,13 +1783,18 @@ function summarizeResults() {
   els.metricTracked.textContent = total ? `${Math.round(tracked.length / total * 100)}%` : "—";
   els.metricPositive.textContent = total ? `${Math.round(positive.length / total * 100)}%` : "—";
   els.metricZone.textContent = zoneLabel(topZone);
+  const quality = summarizeCaptureQuality(samples, calibrationModel);
+  els.metricCalibration.textContent = quality.gaze_quality === "accepted"
+    ? (quality.validation_mean_error_px != null ? `${Math.round(quality.validation_mean_error_px)}px` : "調整済み")
+    : quality.gaze_quality === "rejected" ? "低精度" : "—";
   const seconds = Math.round((contentSamples.at(-1)?.elapsed_ms || 0) / 1000);
   const kindLabel = contentKind === "image" ? "画像" : contentKind === "youtube" ? "YouTube動画" : "動画";
-  const qualityStatus = calibrationModel?.validation?.status || samples.find((sample) => sample.gaze_quality)?.gaze_quality;
+  const qualityStatus = quality.gaze_quality;
   const qualityPrefix = qualityStatus === "rejected" ? "低精度の視線推定です。大きな領域（AOI）の傾向として確認してください。" : "";
+  const experimentPrefix = [participantId && `参加者 ${participantId}`, condition && `条件 ${condition}`].filter(Boolean).join("／");
   els.resultSummary.textContent = tracked.length
-    ? `${qualityPrefix}${kindLabel}と${seconds}秒間の反応から、${tracked.length}点の視線・表情データを同期しました。`
-    : `${kindLabel}と反応を保存しました。この記録では視線データを十分に取得できませんでした。`;
+    ? `${qualityPrefix}${experimentPrefix ? `${experimentPrefix}。` : ""}${kindLabel}と${seconds}秒間の反応から、${tracked.length}点の視線・表情データを同期しました。有効視線 ${Math.round(quality.valid_gaze_ratio * 100)}%。`
+    : `${experimentPrefix ? `${experimentPrefix}。` : ""}${kindLabel}と反応を保存しました。この記録では視線データを十分に取得できませんでした。`;
 }
 
 function resizeHeatmap() {
@@ -1854,7 +1945,7 @@ async function renderSegmentHeatmaps() {
 
 function calculateAllAoiMetrics() { return aoiRegions.map((aoi) => calculateAoiMetrics(aoi, samples, { intervalMs: ANALYSIS_INTERVAL_MS, minDwellMs: AOI_MIN_DWELL_MS, missingGapMs: AOI_MISSING_GAP_MS })); }
 function storedHeatmapSegments() {
-  if (contentKind !== "video") return [];
+  if (!["video", "youtube"].includes(contentKind)) return [];
   return segmentSamples(samples, heatmapSegmentSeconds, contentDurationMs).map(({ start_ms, end_ms, valid_gaze_samples }) => ({ start_ms, end_ms, valid_gaze_samples }));
 }
 async function persistResultEdits() {
@@ -2286,12 +2377,29 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
 }
 
-function captureDataBlob(capture) {
-  return new Blob([JSON.stringify({
+function csvDownloadBlob(text) {
+  return new Blob([`\uFEFF${text}`], { type: "text/csv;charset=utf-8" });
+}
+
+function analysisFileStem(capture = {}) {
+  const participant = String(capture.participant_id || participantId || "anon").replace(/[^\w.-]+/g, "_").slice(0, 32) || "anon";
+  return `viewpulse_${participant}_${timestamp()}`;
+}
+
+function captureAnalysisPayload(capture) {
+  const rows = capture.samples || [];
+  const calibration = capture.calibration_model || null;
+  return {
     app: "ViewPulse",
-    schema_version: 6,
+    schema_version: SCHEMA_VERSION,
     capture_id: capture.id || "",
     created_at: capture.created_at || new Date().toISOString(),
+    experiment: {
+      participant_id: capture.participant_id || "",
+      condition: capture.condition || "",
+      notes: capture.notes || "",
+      image_duration_ms: capture.image_duration_ms || 0,
+    },
     content: {
       kind: capture.content_kind || contentKind,
       name: capture.content_name || contentName,
@@ -2300,9 +2408,9 @@ function captureDataBlob(capture) {
       youtube_video_id: capture.youtube_video_id || youtubeVideoId,
       duration_ms: capture.content_duration_ms || contentDurationMs,
     },
-    synchronization: capture.content_kind === "image" ? "elapsed_ms" : capture.content_kind === "youtube" ? "youtube_playback_ms" : "content_playback_ms",
+    synchronization: (capture.content_kind || contentKind) === "image" ? "elapsed_ms" : (capture.content_kind || contentKind) === "youtube" ? "youtube_playback_ms" : "content_playback_ms",
     calibration: capture.calibration_model?.method || (capture.calibration_model ? "nine-point" : "uncalibrated"),
-    calibration_model: capture.calibration_model || null,
+    calibration_model: calibration,
     recording_geometry: capture.recording_geometry || null,
     heatmap_segment_seconds: capture.heatmap_segment_seconds || HEATMAP_SEGMENT_DEFAULT_SECONDS,
     image_presented_at: capture.image_presented_at || "",
@@ -2313,8 +2421,46 @@ function captureDataBlob(capture) {
     dynamic_aoi_tracks: capture.dynamic_aoi_tracks || [],
     dynamic_aoi_metrics: capture.dynamic_aoi_metrics || [],
     heatmap_segments: capture.heatmap_segments || storedHeatmapSegments(),
-    samples: capture.samples || [],
-  }, null, 2)], { type: "application/json" });
+    quality: capture.quality_summary || summarizeCaptureQuality(rows, calibration),
+    samples: rows,
+  };
+}
+
+function captureDataBlob(capture) {
+  return new Blob([JSON.stringify(captureAnalysisPayload(capture), null, 2)], { type: "application/json" });
+}
+
+function downloadCaptureCsv(capture) {
+  const stem = analysisFileStem(capture);
+  const rows = capture.samples || [];
+  downloadBlob(csvDownloadBlob(samplesToCsv(rows)), `${stem}_samples.csv`);
+  const regions = capture.aoi_regions || [];
+  const aoiMetrics = capture.aoi_metrics || calculateAllAoiMetrics();
+  if (regions.length) {
+    window.setTimeout(() => downloadBlob(csvDownloadBlob(aoiMetricsToCsv(aoiMetrics, regions)), `${stem}_aoi.csv`), 350);
+  }
+  const dynamicMetrics = capture.dynamic_aoi_metrics || [];
+  if (dynamicMetrics.length) {
+    window.setTimeout(() => downloadBlob(csvDownloadBlob(toCsv(dynamicMetrics)), `${stem}_dynamic_aoi.csv`), 700);
+  }
+}
+
+async function exportLibraryAnalysis() {
+  let captures = [];
+  try {
+    captures = (await libraryGetAll()).map(normalizeCapture);
+  } catch {
+    els.storageStatus.textContent = "端末内ライブラリを開けませんでした";
+    return;
+  }
+  if (!captures.length) {
+    els.storageStatus.textContent = "保存する記録がありません";
+    return;
+  }
+  const stem = `viewpulse_library_${timestamp()}`;
+  downloadBlob(new Blob([JSON.stringify(captures.map((capture) => captureAnalysisPayload(capture)), null, 2)], { type: "application/json" }), `${stem}.json`);
+  window.setTimeout(() => downloadBlob(csvDownloadBlob(librarySamplesToCsv(captures)), `${stem}_samples.csv`), 400);
+  els.storageStatus.textContent = `${captures.length}件の分析データを保存しました。映像ファイルは含まれません。`;
 }
 
 function extensionForMime(type, kind = "video") {
@@ -2400,7 +2546,12 @@ function currentCapture() {
     dynamic_aoi_tracks: dynamicAoiTracks,
     dynamic_aoi_metrics: calculateAllDynamicAoiMetrics(),
     heatmap_segments: storedHeatmapSegments(),
-    version: 5,
+    participant_id: participantId,
+    condition,
+    notes: sessionNotes,
+    image_duration_ms: imageDurationMs,
+    quality_summary: summarizeCaptureQuality(samples, calibrationModel),
+    version: SCHEMA_VERSION,
   };
 }
 
@@ -2443,9 +2594,14 @@ els.youtubeUrlInput.addEventListener("keydown", (event) => {
   }
 });
 els.consentAnalysis.addEventListener("change", updateReadiness);
+els.participantIdInput.addEventListener("input", readExperimentFields);
+els.conditionInput.addEventListener("input", readExperimentFields);
+els.sessionNotesInput.addEventListener("input", readExperimentFields);
+els.imageDurationInput.addEventListener("input", readExperimentFields);
 els.prepareButton.addEventListener("click", prepareCapture);
 els.openLibraryButton.addEventListener("click", async () => { showScreen("library"); await renderLibrary(); });
 els.closeLibraryButton.addEventListener("click", () => showScreen("setup"));
+els.exportLibraryButton.addEventListener("click", exportLibraryAnalysis);
 els.calibrateButton.addEventListener("click", runCalibration);
 els.recordButton.addEventListener("click", () => recording ? stopRecording() : startRecording());
 els.closeCaptureButton.addEventListener("click", () => {
@@ -2537,15 +2693,25 @@ els.downloadContentButton.addEventListener("click", () => {
   if (contentKind === "youtube" && contentUrl) window.open(contentUrl, "_blank", "noopener");
   else if (contentBlob) downloadBlob(contentBlob, `viewpulse_content_${timestamp()}.${extensionForMime(contentMime || contentBlob.type, contentKind)}`);
 });
-els.downloadDataButton.addEventListener("click", () => downloadBlob(captureDataBlob(currentCapture()), `viewpulse_data_${timestamp()}.json`));
+els.downloadDataButton.addEventListener("click", () => {
+  const capture = currentCapture();
+  downloadBlob(captureDataBlob(capture), `${analysisFileStem(capture)}_analysis.json`);
+});
+els.downloadCsvButton.addEventListener("click", () => downloadCaptureCsv(currentCapture()));
 window.addEventListener("resize", () => {
   invalidateCalibrationForViewport();
   if (!els.resultsScreen.classList.contains("hidden")) { resizeHeatmap(); drawHeatmap(); drawTimeline(); }
 });
 document.addEventListener("fullscreenchange", () => window.setTimeout(invalidateCalibrationForViewport, 0));
 window.addEventListener("pagehide", stopAllStreams);
+window.addEventListener("beforeunload", (event) => {
+  if (!recording) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 setPreviewMode("pip");
+restoreExperimentFields();
 const sharedParams = new URLSearchParams(location.search);
 const sharedYoutube = sharedParams.get("source") === "share"
   ? findSharedYouTubeUrl(sharedParams.get("url"), sharedParams.get("text"))

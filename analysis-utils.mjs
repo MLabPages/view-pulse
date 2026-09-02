@@ -85,3 +85,77 @@ export function calculateAoiJourney(aois = [], samples = [], options = {}) {
   }
   return { sequence: sequence.map(({ aoi_id, aoi_name, first_ms }) => ({ aoi_id, aoi_name, first_ms })), transitions };
 }
+
+export function summarizeCaptureQuality(samples = [], calibrationModel = null) {
+  const contentSamples = samples.filter((sample) => sample?.gaze_valid_for_content !== 0);
+  const validGaze = contentSamples.filter((sample) => sample?.face_detected && sample?.gaze_x !== "");
+  const missing_reason_counts = {};
+  for (const sample of contentSamples) {
+    const reason = sample?.gaze_missing_reason || (sample?.gaze_x === "" ? "unknown" : "");
+    if (!reason) continue;
+    missing_reason_counts[reason] = (missing_reason_counts[reason] || 0) + 1;
+  }
+  const smileSamples = contentSamples.filter((sample) => Number(sample?.smile) >= 0.35).length;
+  return {
+    gaze_quality: calibrationModel?.validation?.status || contentSamples.find((sample) => sample?.gaze_quality)?.gaze_quality || "unavailable",
+    engine: calibrationModel?.engine || contentSamples[0]?.gaze_engine || "",
+    validation_mean_error_px: calibrationModel?.validation?.mean_error_px ?? null,
+    validation_max_error_px: calibrationModel?.validation?.max_error_px ?? null,
+    validation_mean_diagonal_ratio: calibrationModel?.validation?.mean_diagonal_ratio ?? null,
+    sample_count: contentSamples.length,
+    valid_gaze_samples: validGaze.length,
+    valid_gaze_ratio: contentSamples.length ? validGaze.length / contentSamples.length : 0,
+    smile_ratio: contentSamples.length ? smileSamples / contentSamples.length : 0,
+    missing_reason_counts,
+  };
+}
+
+export function toCsv(rows = [], headers = []) {
+  const keys = headers.length ? headers : [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  if (!keys.length) return "";
+  const escape = (value) => {
+    if (value == null) return "";
+    const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [keys.join(","), ...rows.map((row) => keys.map((key) => escape(row[key])).join(","))].join("\n");
+}
+
+export function samplesToCsv(samples = []) {
+  const headers = samples[0] ? Object.keys(samples[0]) : ["elapsed_ms", "sync_ms", "gaze_x", "gaze_y", "gaze_missing_reason"];
+  return toCsv(samples, headers);
+}
+
+export function aoiMetricsToCsv(metrics = [], regions = []) {
+  return toCsv(metrics.map((metric) => {
+    const region = regions.find((item) => item.id === metric.aoi_id) || {};
+    return {
+      aoi_id: metric.aoi_id,
+      aoi_name: region.name || metric.aoi_name || "",
+      x: region.x ?? "",
+      y: region.y ?? "",
+      width: region.width ?? "",
+      height: region.height ?? "",
+      seen: metric.seen ? 1 : 0,
+      first_arrival_ms: metric.first_arrival_ms ?? "",
+      first_dwell_ms: metric.first_dwell_ms ?? "",
+      dwell_ms: metric.dwell_ms ?? "",
+      average_dwell_ms: metric.average_dwell_ms ?? "",
+      entries: metric.entries ?? 0,
+      revisits: metric.revisits ?? 0,
+      valid_time_ratio: metric.valid_time_ratio ?? "",
+    };
+  }));
+}
+
+export function librarySamplesToCsv(captures = []) {
+  return toCsv(captures.flatMap((capture) => (capture.samples || []).map((sample) => ({
+    capture_id: capture.id || "",
+    created_at: capture.created_at || "",
+    participant_id: capture.participant_id || "",
+    condition: capture.condition || "",
+    content_kind: capture.content_kind || "",
+    content_name: capture.content_name || "",
+    ...sample,
+  }))));
+}

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { extractYouTubeVideoId, findSharedYouTubeUrl } from "./youtube-url.mjs";
 import { applyDirectGazeMapping, evaluatePoseQuality, filterCalibrationSamples, measureAxisSeparation, median, normalizedFeature, resolveMappedGaze, selectDirectGazeMapping, signedPerpendicularFeature } from "./gaze-calibration.mjs";
 import { createYouTubeContentSync } from "./youtube-content-sync.mjs";
-import { calculateAoiJourney, calculateAoiMetrics, segmentSamples } from "./analysis-utils.mjs";
+import { aoiMetricsToCsv, calculateAoiJourney, calculateAoiMetrics, librarySamplesToCsv, samplesToCsv, segmentSamples, summarizeCaptureQuality, toCsv } from "./analysis-utils.mjs";
 import { assignDynamicTracks, calculateDynamicAoiMetrics, dynamicAoiAtTime } from "./dynamic-aoi-utils.mjs";
 
 const [html, app, css, readme, manifestText, serviceWorker, icon, gazeWorker, gazeModel, gazeWeights, gazeLicense] = await Promise.all([
@@ -33,7 +33,7 @@ const requiredAppMarkers = [
   "sync_ms", "currentSyncMs", "runCalibration", "setPreviewMode", "preview-hidden",
   "drawHeatmap", "drawTimeline", "drawReactionComposite", "exportReaction",
   "content_blob", "rear_blob", "legacy_capture", "indexedDB", "renderLibrary",
-  "navigator.share", "libraryDelete", "schema_version: 6", "currentCaptureGeometry", "recording_geometry",
+  "navigator.share", "libraryDelete", "SCHEMA_VERSION = 7", "currentCaptureGeometry", "recording_geometry",
   "loadYouTubeApi", "youtubeCapturePlayer", "youtubeResultPlayer", "youtube_playback_ms",
   "findSharedYouTubeUrl", "serviceWorker.register", "youtube_video_id", "loadSpecializedGazeModel",
   "webeyetrack.worker.js", "gaze_engine: gazeEngine", "youtubeThumbnailUrl", "library-open-target",
@@ -47,6 +47,7 @@ const requiredAppMarkers = [
   "resolveMappedGaze", "gaze_at_edge", "gaze_edge_overflow",
   "createYouTubeContentSync", "gaze_valid_for_content", "pause_reason", "youtube_time_not_advancing", "動画本編の開始を待っています", "記録を開始しました",
   "heatmap_segment_seconds", "heatmap_segments", "image_presented_at", "image_elapsed_ms", "aoi_regions", "推定初回到達時間", "AOI_MIN_DWELL_MS", "content-withheld", "contentKind === \"youtube\"", "映像フレームは表示できません", "maxresdefault", "segmentYoutubeThumbnail", "dynamic_aoi_frames", "analyzeDynamicAois", "ObjectDetector",
+  "participant_id", "downloadCaptureCsv", "exportLibraryAnalysis", "imageDurationMs", "is-recording", "beforeunload", "els.recordButton.disabled = false",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -62,6 +63,7 @@ const requiredHtmlMarkers = [
   'id="calibrationTarget" class="calibration-target" type="button"',
   'id="faceAlignmentGuide"', "顔の位置・距離・向きを調整時と本測定でそろえます", 'id="recordingFaceGuide"', "正面・顔位置 OK",
   "動的AOI（実験）", "物体認識を開始", 'id="dynamicAoiOverlay"',
+  "参加者ID", "全件の分析データを保存", "CSVを保存", 'id="participantIdInput"', 'id="imageDurationInput"', 'id="exportLibraryButton"', 'id="downloadCsvButton"', 'id="metricCalibration"',
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);
@@ -75,8 +77,12 @@ if (!css.includes("word-break: keep-all")) throw new Error("見出しの自然�
 if (!css.includes(".library-back-button") || !css.includes(".library-open-target") || !css.includes('content: "分析を見る"')) {
   throw new Error("ライブラリの戻る操作または分析を開く導線が不足");
 }
+if (!app.includes('if (!["video", "youtube"].includes(contentKind)) return [];')) {
+  throw new Error("YouTube時間帯別ヒートマップの保存が不足");
+}
 if (!readme.includes("旧版") || !readme.includes("外部へ送信")) throw new Error("互換性またはプライバシー説明が不足");
 if (!readme.includes("Netflix") || !readme.includes("YouTube共有から起動")) throw new Error("対応範囲の説明が不足");
+if (!readme.includes("実験での使い方") || !readme.includes("CSV")) throw new Error("実験手順またはCSV書き出しの説明が不足");
 
 const youtubeCases = [
   "https://www.youtube.com/watch?v=M7lc1UVf-VE",
@@ -109,6 +115,22 @@ const journeyCheck = calculateAoiJourney([
   { image_elapsed_ms: 800, gaze_x: .2, gaze_y: .2 }, { image_elapsed_ms: 1000, gaze_x: .2, gaze_y: .2 },
 ], { intervalMs: 200 });
 if (journeyCheck.sequence.map((item) => item.aoi_id).join(",") !== "a,b,a" || journeyCheck.transitions.length !== 2) throw new Error("AOI閲覧順序・遷移集計に失敗");
+const quality = summarizeCaptureQuality([
+  { gaze_valid_for_content: 1, face_detected: 1, gaze_x: 0.2, gaze_y: 0.3, smile: 0.4 },
+  { gaze_valid_for_content: 1, face_detected: 1, gaze_x: "", gaze_y: "", gaze_missing_reason: "face_not_detected", smile: 0 },
+  { gaze_valid_for_content: 0, face_detected: 1, gaze_x: 0.9, gaze_y: 0.9, gaze_missing_reason: "youtube_time_not_advancing" },
+], { engine: "webeyetrack", validation: { status: "accepted", mean_error_px: 12, max_error_px: 18, mean_diagonal_ratio: 0.04 } });
+if (quality.valid_gaze_samples !== 1 || quality.sample_count !== 2 || quality.gaze_quality !== "accepted" || quality.missing_reason_counts.face_not_detected !== 1) {
+  throw new Error("記録品質の要約に失敗");
+}
+const csv = toCsv([{ a: "x,y", b: 1 }, { a: "ok", b: 2 }]);
+if (!csv.startsWith("a,b") || !csv.includes("\"x,y\"") || csv.split("\n").length !== 3) throw new Error("CSV変換に失敗");
+const sampleCsv = samplesToCsv([{ elapsed_ms: 0, gaze_x: 0.2, gaze_y: 0.3 }, { elapsed_ms: 200, gaze_x: "", gaze_y: "" }]);
+if (!sampleCsv.includes("elapsed_ms") || !sampleCsv.includes("0.2")) throw new Error("視線サンプルCSVの作成に失敗");
+const aoiCsv = aoiMetricsToCsv([{ aoi_id: "a", seen: true, dwell_ms: 800, entries: 1, revisits: 0, valid_time_ratio: 1 }], [{ id: "a", name: "人物", x: 0.1, y: 0.1, width: 0.4, height: 0.4 }]);
+if (!aoiCsv.includes("人物") || !aoiCsv.includes("800")) throw new Error("AOI指標CSVの作成に失敗");
+const libraryCsv = librarySamplesToCsv([{ id: "c1", participant_id: "P01", condition: "A", samples: [{ elapsed_ms: 0, gaze_x: 0.2 }] }]);
+if (!libraryCsv.includes("P01") || !libraryCsv.includes("c1")) throw new Error("ライブラリ一括CSVの作成に失敗");
 const dynamicFrames = [
   { sync_ms: 0, detections: [{ label: "person", display_name: "人物", x: .1, y: .1, width: .3, height: .5 }] },
   { sync_ms: 500, detections: [{ label: "person", display_name: "人物", x: .12, y: .1, width: .3, height: .5 }] },
@@ -208,4 +230,4 @@ console.log("OK: 旧rear_blob互換、IndexedDBライブラリ、共有・削除
 console.log("OK: YouTube URL解析・公式プレイヤー同期・PWA共有先・Netflix除外を確認");
 console.log("OK: WebEyeTrack Worker、視線モデル重み、MITライセンスを確認");
 console.log("OK: 複数回キャリブレーションの中央値・モデル選択・座標変換を数値検証");
-console.log("OK: YouTube本編開始待機、停止中の除外、再開後の復帰、通常再生同期を検証");
+console.log("OK: 実験用メタデータ、品質要約、CSV書き出しを検証");

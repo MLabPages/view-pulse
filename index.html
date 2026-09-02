@@ -44,6 +44,25 @@
           <button id="loadYoutubeButton" class="youtube-load-button">読み込む</button>
         </div>
 
+        <div class="privacy-box experiment-box">
+          <h2>実験用の記録情報</h2>
+          <p class="experiment-lead">任意です。入れると保存ファイルと分析データに残り、複数人の記録を後から区別できます。</p>
+          <div class="experiment-fields">
+            <label for="participantIdInput">参加者ID
+              <input id="participantIdInput" type="text" autocomplete="off" maxlength="64" placeholder="例: P01">
+            </label>
+            <label for="conditionInput">条件
+              <input id="conditionInput" type="text" autocomplete="off" maxlength="64" placeholder="例: A / 広告あり">
+            </label>
+            <label id="imageDurationLabel" class="hidden" for="imageDurationInput">画像の表示時間（秒）
+              <input id="imageDurationInput" type="number" min="0" max="180" step="1" inputmode="numeric" placeholder="空欄なら手動停止">
+            </label>
+          </div>
+          <label class="experiment-notes" for="sessionNotesInput">メモ
+            <textarea id="sessionNotesInput" rows="2" maxlength="500" placeholder="刺激番号、教示、特記事項"></textarea>
+          </label>
+        </div>
+
         <p class="compatibility-note"><strong>対応端末について</strong>使うカメラは内カメ1台だけです。iPhone・iPadを含む、カメラとMediaRecorderに対応した主要ブラウザで利用できます。カメラ利用にはHTTPSが必要です。</p>
 
         <div class="privacy-box">
@@ -81,7 +100,10 @@
         <p class="eyebrow">ON-DEVICE LIBRARY</p>
         <h1>この端末に残した、<br>ViewPulse。</h1>
         <p>コンテンツ、任意保存の表情映像、分析値はこのブラウザ内だけに保存されています。自動送信はされません。</p>
-        <div id="storageStatus" class="storage-status">保存容量を確認中…</div>
+        <div class="library-toolbar">
+          <div id="storageStatus" class="storage-status">保存容量を確認中…</div>
+          <button id="exportLibraryButton" class="secondary-button" type="button">全件の分析データを保存</button>
+        </div>
       </div>
       <div id="libraryEmpty" class="empty-state">
         <div>◌</div><h2>保存された記録はまだありません</h2><p>記録を終えると、この端末のライブラリへ自動保存されます。</p>
@@ -213,6 +235,7 @@
           <article><span class="metric-label">視線推定有効率</span><strong id="metricTracked">—</strong><small>顔と目を検出できた割合</small></article>
           <article><span class="metric-label">ポジティブ反応</span><strong id="metricPositive">—</strong><small>笑顔が見られた時間</small></article>
           <article><span class="metric-label">最も多く推定された領域</span><strong id="metricZone">—</strong><small>動画内を9領域に分けた集計</small></article>
+          <article><span class="metric-label">視線調整</span><strong id="metricCalibration">—</strong><small>確認点の精度</small></article>
         </div>
 
         <div class="timeline-card">
@@ -243,6 +266,7 @@
         <button id="shareCaptureButton" class="primary-button">共有する</button>
         <button id="downloadContentButton" class="secondary-button">表示コンテンツを保存</button>
         <button id="downloadDataButton" class="secondary-button">分析データを保存</button>
+        <button id="downloadCsvButton" class="secondary-button">CSVを保存</button>
       </div>
       <p id="saveStatus" class="local-note">すべてのコンテンツ、映像、分析データは、この端末内だけで処理されています。</p>
     </section>
