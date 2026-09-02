@@ -2556,6 +2556,53 @@ function currentCapture() {
 }
 
 function timestamp() { return new Date().toISOString().replace(/[:.]/g, "-"); }
+function returnToSetupForNextCapture() {
+  stopAllStreams();
+  cancelAnimationFrame(reactionRaf);
+  cancelAnimationFrame(youtubeResultRaf);
+  youtubeResultPlayer?.destroy?.();
+  youtubeResultPlayer = null;
+  els.resultFrontVideo.pause();
+  els.resultContentVideo.pause();
+  if (contentResultUrl) URL.revokeObjectURL(contentResultUrl);
+  if (frontResultUrl) URL.revokeObjectURL(frontResultUrl);
+  contentResultUrl = "";
+  frontResultUrl = "";
+  frontBlob = null;
+  frontChunks = [];
+  samples = [];
+  aoiRegions = [];
+  dynamicAoiFrames = [];
+  dynamicAoiTracks = [];
+  calibrationModel = null;
+  recordingGeometry = null;
+  currentCaptureId = "";
+  currentCaptureCreatedAt = "";
+  imagePresentedAt = "";
+  imageAwaitingStart = false;
+  activeHeatmapSegment = null;
+  heatmapSegmentSeconds = HEATMAP_SEGMENT_DEFAULT_SECONDS;
+  els.calibrateButton.innerHTML = "<span>◎</span>視線調整";
+  els.recordButton.classList.remove("recording");
+  els.recordButton.disabled = true;
+  els.recordButton.title = "記録開始";
+  els.captureScreen.classList.remove("is-recording");
+  setPreviewMode("pip");
+  if (contentKind === "youtube" && (contentUrl || youtubeVideoId)) selectYouTubeUrl(contentUrl || youtubeVideoId);
+  else if (contentBlob) {
+    const file = contentBlob instanceof File
+      ? contentBlob
+      : new File([contentBlob], contentName || "content", { type: contentMime || contentBlob.type || "application/octet-stream" });
+    selectContentFile(file);
+  }
+  showScreen("setup");
+  updateReadiness();
+  if (selectedFile || youtubeVideoId) {
+    setSetupStatus(participantId
+      ? `同じ刺激で次の記録ができます。必要なら参加者ID（いま ${participantId}）を更新してください`
+      : "同じ刺激で次の記録ができます。参加者IDを入れると後から区別しやすくなります");
+  }
+}
 function formatDuration(ms) {
   const seconds = Math.max(0, Math.round(number(ms) / 1000));
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -2605,8 +2652,14 @@ els.exportLibraryButton.addEventListener("click", exportLibraryAnalysis);
 els.calibrateButton.addEventListener("click", runCalibration);
 els.recordButton.addEventListener("click", () => recording ? stopRecording() : startRecording());
 els.closeCaptureButton.addEventListener("click", () => {
-  if (recording) stopRecording();
-  else { stopAllStreams(); showScreen("setup"); updateReadiness(); }
+  if (recording) {
+    if (!confirm("記録を終了して結果を保存しますか？")) return;
+    stopRecording();
+    return;
+  }
+  stopAllStreams();
+  showScreen("setup");
+  updateReadiness();
 });
 els.pipModeButton.addEventListener("click", () => setPreviewMode("pip"));
 els.hiddenModeButton.addEventListener("click", () => setPreviewMode("hidden"));
@@ -2620,7 +2673,7 @@ els.contentVideo.addEventListener("loadedmetadata", () => {
   contentDurationMs = Number.isFinite(els.contentVideo.duration) ? Math.round(els.contentVideo.duration * 1000) : contentDurationMs;
 });
 els.contentVideo.addEventListener("ended", () => { if (recording) stopRecording(); });
-els.newCaptureButton.addEventListener("click", () => location.reload());
+els.newCaptureButton.addEventListener("click", returnToSetupForNextCapture);
 document.querySelectorAll(".tab").forEach((button) => button.addEventListener("click", () => { if (!button.disabled) selectTab(button.dataset.tab); }));
 els.resultContentVideo.addEventListener("timeupdate", () => { drawHeatmap(); drawTimeline(); renderDynamicAoiOverlay(); });
 els.resultContentVideo.addEventListener("loadedmetadata", () => { resizeHeatmap(); drawHeatmap(); drawTimeline(); renderDynamicAoiOverlay(); });

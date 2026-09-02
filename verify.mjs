@@ -47,7 +47,7 @@ const requiredAppMarkers = [
   "resolveMappedGaze", "gaze_at_edge", "gaze_edge_overflow",
   "createYouTubeContentSync", "gaze_valid_for_content", "pause_reason", "youtube_time_not_advancing", "動画本編の開始を待っています", "記録を開始しました",
   "heatmap_segment_seconds", "heatmap_segments", "image_presented_at", "image_elapsed_ms", "aoi_regions", "推定初回到達時間", "AOI_MIN_DWELL_MS", "content-withheld", "contentKind === \"youtube\"", "映像フレームは表示できません", "maxresdefault", "segmentYoutubeThumbnail", "dynamic_aoi_frames", "analyzeDynamicAois", "ObjectDetector",
-  "participant_id", "downloadCaptureCsv", "exportLibraryAnalysis", "imageDurationMs", "is-recording", "beforeunload", "els.recordButton.disabled = false",
+  "participant_id", "downloadCaptureCsv", "exportLibraryAnalysis", "imageDurationMs", "is-recording", "beforeunload", "els.recordButton.disabled = false", "returnToSetupForNextCapture",
 ];
 const absentAppMarkers = requiredAppMarkers.filter((marker) => !app.includes(marker));
 if (absentAppMarkers.length) throw new Error(`主要機能が不足: ${absentAppMarkers.join(", ")}`);
@@ -63,7 +63,7 @@ const requiredHtmlMarkers = [
   'id="calibrationTarget" class="calibration-target" type="button"',
   'id="faceAlignmentGuide"', "顔の位置・距離・向きを調整時と本測定でそろえます", 'id="recordingFaceGuide"', "正面・顔位置 OK",
   "動的AOI（実験）", "物体認識を開始", 'id="dynamicAoiOverlay"',
-  "参加者ID", "全件の分析データを保存", "CSVを保存", 'id="participantIdInput"', 'id="imageDurationInput"', 'id="exportLibraryButton"', 'id="downloadCsvButton"', 'id="metricCalibration"',
+  "参加者ID", "全件の分析データを保存", "CSVを保存", 'id="participantIdInput"', 'id="imageDurationInput"', 'id="exportLibraryButton"', 'id="downloadCsvButton"', 'id="metricCalibration"', "次の記録へ",
 ];
 const absentHtmlMarkers = requiredHtmlMarkers.filter((marker) => !html.includes(marker));
 if (absentHtmlMarkers.length) throw new Error(`画面要件が不足: ${absentHtmlMarkers.join(", ")}`);
